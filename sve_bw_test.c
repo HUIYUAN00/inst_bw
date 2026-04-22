@@ -934,6 +934,73 @@ static test_item_t test_registry[] = {
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);
 
+static void print_usage(const char *prog_name) {
+    printf("Usage: %s [options] [test_spec...]\n", prog_name);
+    printf("\nOptions:\n");
+    printf("  -h, --help     Show this help message\n");
+    printf("  -l, --list     List all available tests\n");
+    printf("  -a, --all      Run all tests (default)\n");
+    printf("\nTest Specification:\n");
+    printf("  <index>        Run test by index (0-based)\n");
+    printf("  <name>         Run test by name (partial match)\n");
+    printf("  <category>     Run all tests in a category\n");
+    printf("\nExamples:\n");
+    printf("  %s                    Run all tests\n", prog_name);
+    printf("  %s 0 1 2              Run tests 0, 1, and 2\n", prog_name);
+    printf("  %s NEON               Run all NEON tests\n", prog_name);
+    printf("  %s Gather Scatter     Run Gather and Scatter tests\n", prog_name);
+    printf("  %s \"SVE LD1D\"         Run tests matching 'SVE LD1D'\n", prog_name);
+}
+
+static void print_tests(void) {
+    printf("Available Tests:\n");
+    printf("============================================================\n");
+    printf("%-4s %-22s %10s\n", "Idx", "Test Name", "Category");
+    printf("============================================================\n");
+    for (int i = 0; i < test_count; i++) {
+        printf("%-4d %-22s %10s\n", i, test_registry[i].name, test_registry[i].category);
+    }
+    printf("============================================================\n");
+}
+
+static int should_run_test(int test_idx, int num_specs, char **specs, int *selected_tests) {
+    if (num_specs == 0) return 1;
+    
+    test_item_t *test = &test_registry[test_idx];
+    
+    for (int i = 0; i < num_specs; i++) {
+        char *spec = specs[i];
+        
+        char *endptr;
+        long idx = strtol(spec, &endptr, 10);
+        if (*endptr == '\0' && idx >= 0 && idx < test_count) {
+            if (idx == test_idx) {
+                selected_tests[test_idx] = 1;
+                return 1;
+            }
+            continue;
+        }
+        
+        if (strcmp(spec, test->name) == 0) {
+            selected_tests[test_idx] = 1;
+            return 1;
+        }
+        if (strcmp(spec, test->category) == 0) {
+            selected_tests[test_idx] = 1;
+            return 1;
+        }
+        if (strstr(test->name, spec) != NULL) {
+            selected_tests[test_idx] = 1;
+            return 1;
+        }
+        if (strstr(test->category, spec) != NULL) {
+            selected_tests[test_idx] = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 #pragma endregion
 
 static int verify_gather_ld1w_ld1w(void *a, void *b, void *c, int rank) {
@@ -1240,6 +1307,50 @@ static double run_test(test_item_t *test, void *a, void *b, void *c
 }
 
 int main(int argc, char *argv[]) {
+    int run_all = 1;
+    int num_specs = 0;
+    char **specs = NULL;
+    
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        }
+        if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--list") == 0) {
+            print_tests();
+            return 0;
+        }
+        if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--all") == 0) {
+            run_all = 1;
+            continue;
+        }
+        run_all = 0;
+        num_specs++;
+    }
+    
+    if (!run_all && num_specs > 0) {
+        specs = &argv[argc - num_specs];
+    }
+    
+    int *selected_tests = (int *)malloc(test_count * sizeof(int));
+    memset(selected_tests, 0, test_count * sizeof(int));
+    
+    if (!run_all) {
+        for (int i = 0; i < test_count; i++) {
+            should_run_test(i, num_specs, specs, selected_tests);
+        }
+        int any_selected = 0;
+        for (int i = 0; i < test_count; i++) {
+            if (selected_tests[i]) any_selected = 1;
+        }
+        if (!any_selected) {
+            fprintf(stderr, "No tests match the specified criteria.\n");
+            print_tests();
+            free(selected_tests);
+            return 1;
+        }
+    }
+    
 #ifdef USE_MPI
     MPI_Init(&argc, &argv);
     
@@ -1264,7 +1375,15 @@ int main(int argc, char *argv[]) {
         printf("Buffer Size: %d MB per array\n", BUFFER_SIZE / (1024 * 1024));
         printf("Warmup Iterations: %d\n", WARMUP_ITER);
         printf("Test Iterations: %d\n", TEST_ITER);
-        printf("Registered Tests: %d\n\n", test_count);
+        if (!run_all) {
+            int selected_count = 0;
+            for (int j = 0; j < test_count; j++) {
+                if (selected_tests[j]) selected_count++;
+            }
+            printf("Selected Tests: %d of %d\n\n", selected_count, test_count);
+        } else {
+            printf("Registered Tests: %d\n\n", test_count);
+        }
     }
     
     void *a = NULL, *b = NULL, *c = NULL;
@@ -1315,6 +1434,8 @@ int main(int argc, char *argv[]) {
     }
     
     for (int i = 0; i < test_count; i++) {
+        if (!run_all && !selected_tests[i]) continue;
+        
         test_item_t *test = &test_registry[i];
         
 #ifdef USE_MPI
@@ -1369,6 +1490,7 @@ int main(int argc, char *argv[]) {
     free(b);
     free(c);
     free(gather_indices);
+    free(selected_tests);
     
 #ifdef USE_MPI
     MPI_Finalize();

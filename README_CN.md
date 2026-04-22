@@ -36,11 +36,29 @@ make all
 ## 运行
 
 ```bash
-# 单进程测试
+# 单进程测试（运行所有测试）
 ./sve_bw_test
+
+# 显示帮助信息
+./sve_bw_test --help
+
+# 列出所有可用测试项
+./sve_bw_test --list
+
+# 运行指定测试（按索引）
+./sve_bw_test 0 1 2
+
+# 运行指定测试（按类别）
+./sve_bw_test STREAM
+
+# 运行指定测试（按名称部分匹配）
+./sve_bw_test "LD1D"
 
 # MPI 并行测试（4进程）
 mpirun -np 4 ./sve_bw_test_mpi
+
+# MPI 并行测试指定测试项
+mpirun -np 4 ./sve_bw_test_mpi Gather Scatter
 
 # 或使用 Makefile 快捷命令
 make run_single  # 单进程
