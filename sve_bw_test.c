@@ -33,7 +33,7 @@ static inline double get_bandwidth(uint64_t bytes, double time_sec) {
 #pragma GCC push_options
 #pragma GCC optimize ("O3")
 
-#pragma region NEON_LOAD_TESTS
+//=== NEON_LOAD_TESTS
 
 static void neon_ldp_read(void *a, void *b, void *c, uint64_t size, double scalar) {
     float *src = (float *)a;
@@ -57,9 +57,9 @@ static void neon_ldp_read(void *a, void *b, void *c, uint64_t size, double scala
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region NEON_STORE_TESTS
+//=== NEON_STORE_TESTS
 
 static void neon_stp_write(void *a, void *b, void *c, uint64_t size, double scalar) {
     float *dst = (float *)a;
@@ -105,9 +105,9 @@ static void neon_stp_write(void *a, void *b, void *c, uint64_t size, double scal
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region NEON_COPY_TESTS
+//=== NEON_COPY_TESTS
 
 static void neon_ldp_stp_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
     float *src = (float *)b;
@@ -132,9 +132,9 @@ static void neon_ldp_stp_copy(void *a, void *b, void *c, uint64_t size, double s
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_LD1B_TESTS
+//=== SVE_LD1B_TESTS
 
 static void sve_ld1b_read(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *src = (uint8_t *)a;
@@ -160,9 +160,9 @@ static void sve_ld1b_read(void *a, void *b, void *c, uint64_t size, double scala
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_ST1B_TESTS
+//=== SVE_ST1B_TESTS
 
 static void sve_st1b_write(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *dst = (uint8_t *)a;
@@ -202,9 +202,9 @@ static void sve_st1b_write(void *a, void *b, void *c, uint64_t size, double scal
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_LD1B_ST1B_TESTS
+//=== SVE_LD1B_ST1B_TESTS
 
 static void sve_ld1b_st1b_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *src = (uint8_t *)b;
@@ -240,9 +240,9 @@ static void sve_ld1b_st1b_copy(void *a, void *b, void *c, uint64_t size, double 
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_LD1W_TESTS
+//=== SVE_LD1W_TESTS
 
 static void sve_ld1w_read(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *src = (uint8_t *)a;
@@ -268,9 +268,9 @@ static void sve_ld1w_read(void *a, void *b, void *c, uint64_t size, double scala
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_ST1W_TESTS
+//=== SVE_ST1W_TESTS
 
 static void sve_st1w_write(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *dst = (uint8_t *)a;
@@ -310,9 +310,9 @@ static void sve_st1w_write(void *a, void *b, void *c, uint64_t size, double scal
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_LD1W_ST1W_TESTS
+//=== SVE_LD1W_ST1W_TESTS
 
 static void sve_ld1w_st1w_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *src = (uint8_t *)b;
@@ -348,9 +348,9 @@ static void sve_ld1w_st1w_copy(void *a, void *b, void *c, uint64_t size, double 
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_LD1D_TESTS
+//=== SVE_LD1D_TESTS
 
 static void sve_ld1d_read(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *src = (uint8_t *)a;
@@ -376,9 +376,9 @@ static void sve_ld1d_read(void *a, void *b, void *c, uint64_t size, double scala
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_ST1D_TESTS
+//=== SVE_ST1D_TESTS
 
 static void sve_st1d_write(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *dst = (uint8_t *)a;
@@ -418,9 +418,9 @@ static void sve_st1d_write(void *a, void *b, void *c, uint64_t size, double scal
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_LD1D_ST1D_TESTS
+//=== SVE_LD1D_ST1D_TESTS
 
 static void sve_ld1d_st1d_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
     uint8_t *src = (uint8_t *)b;
@@ -456,9 +456,9 @@ static void sve_ld1d_st1d_copy(void *a, void *b, void *c, uint64_t size, double 
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region STREAM_BENCHMARK_TESTS
+//=== STREAM_BENCHMARK_TESTS
 
 static void stream_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *dst = (double *)a;
@@ -594,9 +594,9 @@ static void stream_triad(void *a, void *b, void *c, uint64_t size, double scalar
     }
 }
 
-#pragma endregion
+//=== End
 
-#pragma region SVE_GATHER_TESTS
+//=== SVE_GATHER_TESTS
 
 static void sve_gather_ld1w_ld1w(void *a, void *b, void *c, uint64_t size, double scalar) {
     float *src = (float *)b;
@@ -896,11 +896,11 @@ static void sve_gather_scatter_d(void *a, void *b, void *c, uint64_t size, doubl
     }
 }
 
-#pragma endregion
+//=== End
 
 #pragma GCC pop_options
 
-#pragma region TEST_REGISTRY
+//=== TEST_REGISTRY
 
 static test_item_t test_registry[] = {
     {"NEON LDP (Read)",      "Load",    neon_ldp_read,        BUFFER_SIZE,      0, 0},
@@ -1001,7 +1001,7 @@ static int should_run_test(int test_idx, int num_specs, char **specs, int *selec
     return 0;
 }
 
-#pragma endregion
+//=== End
 
 static int verify_gather_ld1w_ld1w(void *a, void *b, void *c, int rank) {
     float *src = (float *)b;
