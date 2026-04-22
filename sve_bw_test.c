@@ -653,45 +653,39 @@ static void sve_gather_ld1sw_ld1d(void *a, void *b, void *c, uint64_t size, doub
     int32_t *idx_base = gather_indices;
     uint64_t vl_bytes = svcntb();
     uint64_t vl_d = vl_bytes / sizeof(int64_t);
-    uint64_t vl_s = vl_bytes / sizeof(int32_t);
     uint64_t chunk_bytes = vl_d * 4 * sizeof(double);
     uint64_t iterations = size / chunk_bytes;
-    uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl_s * 4);
+    uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl_d * 4);
     
     for (uint64_t i = 0; i < iterations; i++) {
         if (i % idx_pool_iters == 0) idx_base = gather_indices;
         
         __asm__ volatile (
-            "ptrue p0.s\n"
-            "ld1w z0.s, p0/z, [%[idx], #0, MUL VL]\n"
-            "ld1w z1.s, p0/z, [%[idx], #1, MUL VL]\n"
-            "ld1w z2.s, p0/z, [%[idx], #2, MUL VL]\n"
-            "ld1w z3.s, p0/z, [%[idx], #3, MUL VL]\n"
-            "ptrue p1.d\n"
-            "sunpklo z4.d, z0.s\n"
-            "sunpklo z5.d, z1.s\n"
-            "sunpklo z6.d, z2.s\n"
-            "sunpklo z7.d, z3.s\n"
-            "ld1sw z8.d, p1/z, [%[sw], z4.d, lsl 2]\n"
-            "ld1sw z9.d, p1/z, [%[sw], z5.d, lsl 2]\n"
-            "ld1sw z10.d, p1/z, [%[sw], z6.d, lsl 2]\n"
-            "ld1sw z11.d, p1/z, [%[sw], z7.d, lsl 2]\n"
-            "ld1d z12.d, p1/z, [%[sd], z4.d, lsl 3]\n"
-            "ld1d z13.d, p1/z, [%[sd], z5.d, lsl 3]\n"
-            "ld1d z14.d, p1/z, [%[sd], z6.d, lsl 3]\n"
-            "ld1d z15.d, p1/z, [%[sd], z7.d, lsl 3]\n"
-            "st1d z12.d, p1, [%[d], #0, MUL VL]\n"
-            "st1d z13.d, p1, [%[d], #1, MUL VL]\n"
-            "st1d z14.d, p1, [%[d], #2, MUL VL]\n"
-            "st1d z15.d, p1, [%[d], #3, MUL VL]\n"
-            "add %[idx], %[idx], %[inci]\n"
+            "ptrue p0.d\n"
+            "ld1sw z4.d, p0/z, [%[idx], #0, MUL VL]\n"
+            "ld1sw z5.d, p0/z, [%[idx], #1, MUL VL]\n"
+            "ld1sw z6.d, p0/z, [%[idx], #2, MUL VL]\n"
+            "ld1sw z7.d, p0/z, [%[idx], #3, MUL VL]\n"
+            "ld1sw z8.d, p0/z, [%[sw], z4.d, lsl 2]\n"
+            "ld1sw z9.d, p0/z, [%[sw], z5.d, lsl 2]\n"
+            "ld1sw z10.d, p0/z, [%[sw], z6.d, lsl 2]\n"
+            "ld1sw z11.d, p0/z, [%[sw], z7.d, lsl 2]\n"
+            "ld1d z12.d, p0/z, [%[sd], z4.d, lsl 3]\n"
+            "ld1d z13.d, p0/z, [%[sd], z5.d, lsl 3]\n"
+            "ld1d z14.d, p0/z, [%[sd], z6.d, lsl 3]\n"
+            "ld1d z15.d, p0/z, [%[sd], z7.d, lsl 3]\n"
+            "st1d z12.d, p0, [%[d], #0, MUL VL]\n"
+            "st1d z13.d, p0, [%[d], #1, MUL VL]\n"
+            "st1d z14.d, p0, [%[d], #2, MUL VL]\n"
+            "st1d z15.d, p0, [%[d], #3, MUL VL]\n"
+            "add %[idx], %[idx], %[inc]\n"
             "add %[d], %[d], %[incd]\n"
             : [idx] "+r" (idx_base), [d] "+r" (dst)
             : [sw] "r" (src_sw), [sd] "r" (src_d), 
-              [inci] "r" (vl_s * 4 * sizeof(int32_t)),
+              [inc] "r" (vl_d * 4 * sizeof(int32_t)),
               [incd] "r" (vl_d * 4 * sizeof(double))
-            : "p0", "p1",
-              "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
+            : "p0",
+              "z4", "z5", "z6", "z7",
               "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
         );
     }
@@ -1040,13 +1034,12 @@ static int verify_gather_ld1sw_ld1d(void *a, void *b, void *c, int rank) {
     int32_t *indices = gather_indices;
     int errors = 0;
     uint64_t vl_d = svcntb() / sizeof(int64_t);
-    uint64_t vl_s = svcntb() / sizeof(int32_t);
     uint64_t total_elements = BUFFER_SIZE / sizeof(double);
     
     for (uint64_t i = 0; i < total_elements && errors < 5; i++) {
         uint64_t iter = i / (vl_d * 4);
         uint64_t pos_in_iter = i % (vl_d * 4);
-        uint64_t idx_pos = (iter % (INDEX_POOL_SIZE / (vl_s * 4))) * (vl_s * 4) + pos_in_iter;
+        uint64_t idx_pos = (iter % (INDEX_POOL_SIZE / (vl_d * 4))) * (vl_d * 4) + pos_in_iter;
         
         if (idx_pos >= INDEX_POOL_SIZE) continue;
         
