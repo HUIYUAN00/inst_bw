@@ -1418,7 +1418,7 @@ int main(int argc, char *argv[]) {
     memset(b, 0xAA, BUFFER_SIZE);
     memset(c, 0x33, BUFFER_SIZE);
     
-    srand(42 + rank);
+    srand(42);
     uint64_t max_element_idx_64 = BUFFER_SIZE / sizeof(int64_t) - 1;
     uint64_t stride = max_element_idx_64 / INDEX_POOL_SIZE;
     if (stride < 1) stride = 1;
