@@ -65,6 +65,10 @@ make run         # MPI 4进程
 | SVE LD1D+ST1D (Copy) | Copy | SVE 双字复制测试 |
 | SVE Gather LD1W | Gather | SVE 收集加载测试（字） |
 | SVE Gather LD1SW+LD1D | Gather | SVE 收集加载测试（双字） |
+| SVE Scatter ST1W | Scatter | SVE 分散存储测试（字） |
+| SVE Scatter ST1D | Scatter | SVE 分散存储测试（双字） |
+| SVE Gather+Scatter W | GatherScatter | SVE 收集加载+分散存储测试（字） |
+| SVE Gather+Scatter D | GatherScatter | SVE 收集加载+分散存储测试（双字） |
 | STREAM Copy | STREAM | STREAM Copy 测试 |
 | STREAM Scale | STREAM | STREAM Scale 测试 |
 | STREAM Add | STREAM | STREAM Add 测试 |

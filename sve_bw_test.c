@@ -697,6 +697,205 @@ static void sve_gather_ld1sw_ld1d(void *a, void *b, void *c, uint64_t size, doub
     }
 }
 
+static void sve_scatter_st1w(void *a, void *b, void *c, uint64_t size, double scalar) {
+    float *src = (float *)a;
+    float *dst = (float *)b;
+    int32_t *idx_base = gather_indices;
+    uint64_t vl = svcntb() / sizeof(int32_t);
+    uint64_t chunk_bytes = vl * 8 * sizeof(float);
+    uint64_t iterations = size / chunk_bytes;
+    uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl * 8);
+    
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (i % idx_pool_iters == 0) idx_base = gather_indices;
+        
+        __asm__ volatile (
+            "ptrue p0.s\n"
+            "ld1w z0.s, p0/z, [%[s], #0, MUL VL]\n"
+            "ld1w z1.s, p0/z, [%[s], #1, MUL VL]\n"
+            "ld1w z2.s, p0/z, [%[s], #2, MUL VL]\n"
+            "ld1w z3.s, p0/z, [%[s], #3, MUL VL]\n"
+            "ld1w z8.s, p0/z, [%[idx], #0, MUL VL]\n"
+            "ld1w z9.s, p0/z, [%[idx], #1, MUL VL]\n"
+            "ld1w z10.s, p0/z, [%[idx], #2, MUL VL]\n"
+            "ld1w z11.s, p0/z, [%[idx], #3, MUL VL]\n"
+            "st1w z0.s, p0, [%[d], z8.s, sxtw 2]\n"
+            "st1w z1.s, p0, [%[d], z9.s, sxtw 2]\n"
+            "st1w z2.s, p0, [%[d], z10.s, sxtw 2]\n"
+            "st1w z3.s, p0, [%[d], z11.s, sxtw 2]\n"
+            "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
+            "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
+            "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
+            "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
+            "ld1w z12.s, p0/z, [%[idx], #4, MUL VL]\n"
+            "ld1w z13.s, p0/z, [%[idx], #5, MUL VL]\n"
+            "ld1w z14.s, p0/z, [%[idx], #6, MUL VL]\n"
+            "ld1w z15.s, p0/z, [%[idx], #7, MUL VL]\n"
+            "st1w z4.s, p0, [%[d], z12.s, sxtw 2]\n"
+            "st1w z5.s, p0, [%[d], z13.s, sxtw 2]\n"
+            "st1w z6.s, p0, [%[d], z14.s, sxtw 2]\n"
+            "st1w z7.s, p0, [%[d], z15.s, sxtw 2]\n"
+            "add %[idx], %[idx], %[inc]\n"
+            "add %[s], %[s], %[inc]\n"
+            : [idx] "+r" (idx_base), [s] "+r" (src)
+            : [d] "r" (dst), [inc] "r" (chunk_bytes)
+            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
+              "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
+        );
+    }
+}
+
+static void sve_scatter_st1d(void *a, void *b, void *c, uint64_t size, double scalar) {
+    double *src = (double *)a;
+    double *dst = (double *)b;
+    int32_t *idx_base = gather_indices;
+    uint64_t vl_bytes = svcntb();
+    uint64_t vl_d = vl_bytes / sizeof(int64_t);
+    uint64_t chunk_bytes = vl_d * 4 * sizeof(double);
+    uint64_t iterations = size / chunk_bytes;
+    uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl_d * 4);
+    
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (i % idx_pool_iters == 0) idx_base = gather_indices;
+        
+        __asm__ volatile (
+            "ptrue p0.d\n"
+            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
+            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
+            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
+            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
+            "ld1sw z12.d, p0/z, [%[idx], #0, MUL VL]\n"
+            "ld1sw z13.d, p0/z, [%[idx], #1, MUL VL]\n"
+            "ld1sw z14.d, p0/z, [%[idx], #2, MUL VL]\n"
+            "ld1sw z15.d, p0/z, [%[idx], #3, MUL VL]\n"
+            "st1d z0.d, p0, [%[d], z12.d, lsl 3]\n"
+            "st1d z1.d, p0, [%[d], z13.d, lsl 3]\n"
+            "st1d z2.d, p0, [%[d], z14.d, lsl 3]\n"
+            "st1d z3.d, p0, [%[d], z15.d, lsl 3]\n"
+            "add %[idx], %[idx], %[inc]\n"
+            "add %[s], %[s], %[incd]\n"
+            : [idx] "+r" (idx_base), [s] "+r" (src)
+            : [d] "r" (dst), 
+              [inc] "r" (vl_d * 4 * sizeof(int32_t)),
+              [incd] "r" (vl_d * 4 * sizeof(double))
+            : "p0",
+              "z0", "z1", "z2", "z3",
+              "z12", "z13", "z14", "z15", "memory"
+        );
+    }
+}
+
+static void sve_gather_scatter_w(void *a, void *b, void *c, uint64_t size, double scalar) {
+    float *src = (float *)b;
+    float *dst = (float *)a;
+    int32_t *idx_base = gather_indices;
+    uint64_t vl = svcntb() / sizeof(int32_t);
+    uint64_t chunk_bytes = vl * 8 * sizeof(float);
+    uint64_t iterations = size / chunk_bytes;
+    uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl * 16);
+    
+    int32_t *src_idx = idx_base;
+    int32_t *dst_idx = idx_base + INDEX_POOL_SIZE / 2;
+    
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (i % idx_pool_iters == 0) {
+            src_idx = idx_base;
+            dst_idx = idx_base + INDEX_POOL_SIZE / 2;
+        }
+        
+        __asm__ volatile (
+            "ptrue p0.s\n"
+            "ld1w z8.s, p0/z, [%[si], #0, MUL VL]\n"
+            "ld1w z9.s, p0/z, [%[si], #1, MUL VL]\n"
+            "ld1w z10.s, p0/z, [%[si], #2, MUL VL]\n"
+            "ld1w z11.s, p0/z, [%[si], #3, MUL VL]\n"
+            "ld1w z0.s, p0/z, [%[s], z8.s, sxtw 2]\n"
+            "ld1w z1.s, p0/z, [%[s], z9.s, sxtw 2]\n"
+            "ld1w z2.s, p0/z, [%[s], z10.s, sxtw 2]\n"
+            "ld1w z3.s, p0/z, [%[s], z11.s, sxtw 2]\n"
+            "ld1w z12.s, p0/z, [%[di], #0, MUL VL]\n"
+            "ld1w z13.s, p0/z, [%[di], #1, MUL VL]\n"
+            "ld1w z14.s, p0/z, [%[di], #2, MUL VL]\n"
+            "ld1w z15.s, p0/z, [%[di], #3, MUL VL]\n"
+            "st1w z0.s, p0, [%[d], z12.s, sxtw 2]\n"
+            "st1w z1.s, p0, [%[d], z13.s, sxtw 2]\n"
+            "st1w z2.s, p0, [%[d], z14.s, sxtw 2]\n"
+            "st1w z3.s, p0, [%[d], z15.s, sxtw 2]\n"
+            "ld1w z4.s, p0/z, [%[si], #4, MUL VL]\n"
+            "ld1w z5.s, p0/z, [%[si], #5, MUL VL]\n"
+            "ld1w z6.s, p0/z, [%[si], #6, MUL VL]\n"
+            "ld1w z7.s, p0/z, [%[si], #7, MUL VL]\n"
+            "ld1w z0.s, p0/z, [%[s], z4.s, sxtw 2]\n"
+            "ld1w z1.s, p0/z, [%[s], z5.s, sxtw 2]\n"
+            "ld1w z2.s, p0/z, [%[s], z6.s, sxtw 2]\n"
+            "ld1w z3.s, p0/z, [%[s], z7.s, sxtw 2]\n"
+            "ld1w z12.s, p0/z, [%[di], #4, MUL VL]\n"
+            "ld1w z13.s, p0/z, [%[di], #5, MUL VL]\n"
+            "ld1w z14.s, p0/z, [%[di], #6, MUL VL]\n"
+            "ld1w z15.s, p0/z, [%[di], #7, MUL VL]\n"
+            "st1w z0.s, p0, [%[d], z12.s, sxtw 2]\n"
+            "st1w z1.s, p0, [%[d], z13.s, sxtw 2]\n"
+            "st1w z2.s, p0, [%[d], z14.s, sxtw 2]\n"
+            "st1w z3.s, p0, [%[d], z15.s, sxtw 2]\n"
+            "add %[si], %[si], %[inc]\n"
+            "add %[di], %[di], %[inc]\n"
+            : [si] "+r" (src_idx), [di] "+r" (dst_idx)
+            : [s] "r" (src), [d] "r" (dst), [inc] "r" (chunk_bytes)
+            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
+              "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
+        );
+    }
+}
+
+static void sve_gather_scatter_d(void *a, void *b, void *c, uint64_t size, double scalar) {
+    double *src = (double *)b;
+    double *dst = (double *)a;
+    int32_t *idx_base = gather_indices;
+    uint64_t vl_bytes = svcntb();
+    uint64_t vl_d = vl_bytes / sizeof(int64_t);
+    uint64_t chunk_bytes = vl_d * 4 * sizeof(double);
+    uint64_t iterations = size / chunk_bytes;
+    uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl_d * 8);
+    
+    int32_t *src_idx = idx_base;
+    int32_t *dst_idx = idx_base + INDEX_POOL_SIZE / 2;
+    
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (i % idx_pool_iters == 0) {
+            src_idx = idx_base;
+            dst_idx = idx_base + INDEX_POOL_SIZE / 2;
+        }
+        
+        __asm__ volatile (
+            "ptrue p0.d\n"
+            "ld1sw z4.d, p0/z, [%[si], #0, MUL VL]\n"
+            "ld1sw z5.d, p0/z, [%[si], #1, MUL VL]\n"
+            "ld1sw z6.d, p0/z, [%[si], #2, MUL VL]\n"
+            "ld1sw z7.d, p0/z, [%[si], #3, MUL VL]\n"
+            "ld1d z8.d, p0/z, [%[s], z4.d, lsl 3]\n"
+            "ld1d z9.d, p0/z, [%[s], z5.d, lsl 3]\n"
+            "ld1d z10.d, p0/z, [%[s], z6.d, lsl 3]\n"
+            "ld1d z11.d, p0/z, [%[s], z7.d, lsl 3]\n"
+            "ld1sw z0.d, p0/z, [%[di], #0, MUL VL]\n"
+            "ld1sw z1.d, p0/z, [%[di], #1, MUL VL]\n"
+            "ld1sw z2.d, p0/z, [%[di], #2, MUL VL]\n"
+            "ld1sw z3.d, p0/z, [%[di], #3, MUL VL]\n"
+            "st1d z8.d, p0, [%[d], z0.d, lsl 3]\n"
+            "st1d z9.d, p0, [%[d], z1.d, lsl 3]\n"
+            "st1d z10.d, p0, [%[d], z2.d, lsl 3]\n"
+            "st1d z11.d, p0, [%[d], z3.d, lsl 3]\n"
+            "add %[si], %[si], %[inc]\n"
+            "add %[di], %[di], %[inc]\n"
+            : [si] "+r" (src_idx), [di] "+r" (dst_idx)
+            : [s] "r" (src), [d] "r" (dst), 
+              [inc] "r" (vl_d * 4 * sizeof(int32_t))
+            : "p0",
+              "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
+              "z8", "z9", "z10", "z11", "memory"
+        );
+    }
+}
+
 #pragma endregion
 
 #pragma GCC pop_options
@@ -722,6 +921,10 @@ static test_item_t test_registry[] = {
     
     {"SVE Gather LD1W",      "Gather",  sve_gather_ld1w_ld1w, BUFFER_SIZE * 2,  0, 0},
     {"SVE Gather LD1SW+LD1D","Gather",  sve_gather_ld1sw_ld1d,BUFFER_SIZE * 3,  1, 0},
+    {"SVE Scatter ST1W",     "Scatter", sve_scatter_st1w,     BUFFER_SIZE * 2,  0, 0},
+    {"SVE Scatter ST1D",     "Scatter", sve_scatter_st1d,     BUFFER_SIZE * 2,  0, 0},
+    {"SVE Gather+Scatter W", "GatherScatter", sve_gather_scatter_w, BUFFER_SIZE * 2,  0, 0},
+    {"SVE Gather+Scatter D", "GatherScatter", sve_gather_scatter_d, BUFFER_SIZE * 2,  0, 0},
     
     {"STREAM Copy",          "STREAM",  stream_copy,          BUFFER_SIZE * 2,  0, 0},
     {"STREAM Scale",         "STREAM",  stream_scale,         BUFFER_SIZE * 2,  0, 1},
@@ -793,6 +996,214 @@ static int verify_gather_ld1sw_ld1d(void *a, void *b, void *c, int rank) {
             errors++;
         }
     }
+    return errors;
+}
+
+static int verify_scatter_st1w(void *a, void *b, void *c, int rank) {
+    float *src = (float *)a;
+    float *dst = (float *)b;
+    int32_t *indices = gather_indices;
+    int errors = 0;
+    uint64_t vl = svcntb() / sizeof(int32_t);
+    uint64_t total_elements = BUFFER_SIZE / sizeof(float);
+    uint64_t dst_size = BUFFER_SIZE / sizeof(float);
+    
+    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
+    float *expected_val = (float *)malloc(dst_size * sizeof(float));
+    memset(write_count, 0, dst_size * sizeof(uint64_t));
+    
+    for (uint64_t i = 0; i < total_elements; i++) {
+        uint64_t iter = i / (vl * 8);
+        uint64_t pos_in_iter = i % (vl * 8);
+        uint64_t idx_pos = (iter % (INDEX_POOL_SIZE / (vl * 8))) * (vl * 8) + pos_in_iter;
+        
+        if (idx_pos >= INDEX_POOL_SIZE) continue;
+        
+        int32_t dst_elem_idx = indices[idx_pos];
+        if (dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
+            write_count[dst_elem_idx]++;
+            expected_val[dst_elem_idx] = src[i];
+        }
+    }
+    
+    int verified = 0;
+    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
+        if (write_count[i] == 1) {
+            if (dst[i] != expected_val[i] && errors < 5) {
+                if (errors == 0) {
+                    fprintf(stderr, "[Rank %d] ST1W Scatter verify FAILED:\n", rank);
+                }
+                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f (written once)\n",
+                        i, expected_val[i], dst[i]);
+                errors++;
+            }
+            verified++;
+        }
+    }
+    
+    free(write_count);
+    free(expected_val);
+    return errors;
+}
+
+static int verify_scatter_st1d(void *a, void *b, void *c, int rank) {
+    double *src = (double *)a;
+    double *dst = (double *)b;
+    int32_t *indices = gather_indices;
+    int errors = 0;
+    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t total_elements = BUFFER_SIZE / sizeof(double);
+    uint64_t dst_size = BUFFER_SIZE / sizeof(double);
+    
+    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
+    double *expected_val = (double *)malloc(dst_size * sizeof(double));
+    memset(write_count, 0, dst_size * sizeof(uint64_t));
+    
+    for (uint64_t i = 0; i < total_elements; i++) {
+        uint64_t iter = i / (vl_d * 4);
+        uint64_t pos_in_iter = i % (vl_d * 4);
+        uint64_t idx_pos = (iter % (INDEX_POOL_SIZE / (vl_d * 4))) * (vl_d * 4) + pos_in_iter;
+        
+        if (idx_pos >= INDEX_POOL_SIZE) continue;
+        
+        int32_t dst_elem_idx = indices[idx_pos];
+        if (dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
+            write_count[dst_elem_idx]++;
+            expected_val[dst_elem_idx] = src[i];
+        }
+    }
+    
+    int verified = 0;
+    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
+        if (write_count[i] == 1) {
+            if (dst[i] != expected_val[i] && errors < 5) {
+                if (errors == 0) {
+                    fprintf(stderr, "[Rank %d] ST1D Scatter verify FAILED:\n", rank);
+                }
+                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f (written once)\n",
+                        i, expected_val[i], dst[i]);
+                errors++;
+            }
+            verified++;
+        }
+    }
+    
+    free(write_count);
+    free(expected_val);
+    return errors;
+}
+
+static int verify_gather_scatter_w(void *a, void *b, void *c, int rank) {
+    float *src = (float *)b;
+    float *dst = (float *)a;
+    int32_t *indices = gather_indices;
+    int errors = 0;
+    uint64_t vl = svcntb() / sizeof(int32_t);
+    uint64_t total_elements = BUFFER_SIZE / sizeof(float);
+    uint64_t src_size = BUFFER_SIZE / sizeof(float);
+    uint64_t dst_size = BUFFER_SIZE / sizeof(float);
+    
+    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
+    float *expected_val = (float *)malloc(dst_size * sizeof(float));
+    memset(write_count, 0, dst_size * sizeof(uint64_t));
+    
+    int32_t *src_idx_base = indices;
+    int32_t *dst_idx_base = indices + INDEX_POOL_SIZE / 2;
+    
+    for (uint64_t i = 0; i < total_elements; i++) {
+        uint64_t iter = i / (vl * 8);
+        uint64_t pos_in_iter = i % (vl * 8);
+        uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl * 16);
+        uint64_t src_idx_pos = (iter % idx_pool_iters) * (vl * 8) + pos_in_iter;
+        uint64_t dst_idx_pos = (iter % idx_pool_iters) * (vl * 8) + pos_in_iter;
+        
+        if (src_idx_pos >= INDEX_POOL_SIZE / 2) continue;
+        if (dst_idx_pos >= INDEX_POOL_SIZE / 2) continue;
+        
+        int32_t src_elem_idx = src_idx_base[src_idx_pos];
+        int32_t dst_elem_idx = dst_idx_base[dst_idx_pos];
+        
+        if (src_elem_idx >= 0 && src_elem_idx < src_size &&
+            dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
+            write_count[dst_elem_idx]++;
+            expected_val[dst_elem_idx] = src[src_elem_idx];
+        }
+    }
+    
+    int verified = 0;
+    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
+        if (write_count[i] == 1) {
+            if (dst[i] != expected_val[i] && errors < 5) {
+                if (errors == 0) {
+                    fprintf(stderr, "[Rank %d] Gather+Scatter W verify FAILED:\n", rank);
+                }
+                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n",
+                        i, expected_val[i], dst[i]);
+                errors++;
+            }
+            verified++;
+        }
+    }
+    
+    free(write_count);
+    free(expected_val);
+    return errors;
+}
+
+static int verify_gather_scatter_d(void *a, void *b, void *c, int rank) {
+    double *src = (double *)b;
+    double *dst = (double *)a;
+    int32_t *indices = gather_indices;
+    int errors = 0;
+    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t total_elements = BUFFER_SIZE / sizeof(double);
+    uint64_t src_size = BUFFER_SIZE / sizeof(double);
+    uint64_t dst_size = BUFFER_SIZE / sizeof(double);
+    
+    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
+    double *expected_val = (double *)malloc(dst_size * sizeof(double));
+    memset(write_count, 0, dst_size * sizeof(uint64_t));
+    
+    int32_t *src_idx_base = indices;
+    int32_t *dst_idx_base = indices + INDEX_POOL_SIZE / 2;
+    
+    for (uint64_t i = 0; i < total_elements; i++) {
+        uint64_t iter = i / (vl_d * 4);
+        uint64_t pos_in_iter = i % (vl_d * 4);
+        uint64_t idx_pool_iters = INDEX_POOL_SIZE / (vl_d * 8);
+        uint64_t src_idx_pos = (iter % idx_pool_iters) * (vl_d * 4) + pos_in_iter;
+        uint64_t dst_idx_pos = (iter % idx_pool_iters) * (vl_d * 4) + pos_in_iter;
+        
+        if (src_idx_pos >= INDEX_POOL_SIZE / 2) continue;
+        if (dst_idx_pos >= INDEX_POOL_SIZE / 2) continue;
+        
+        int32_t src_elem_idx = src_idx_base[src_idx_pos];
+        int32_t dst_elem_idx = dst_idx_base[dst_idx_pos];
+        
+        if (src_elem_idx >= 0 && src_elem_idx < src_size &&
+            dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
+            write_count[dst_elem_idx]++;
+            expected_val[dst_elem_idx] = src[src_elem_idx];
+        }
+    }
+    
+    int verified = 0;
+    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
+        if (write_count[i] == 1) {
+            if (dst[i] != expected_val[i] && errors < 5) {
+                if (errors == 0) {
+                    fprintf(stderr, "[Rank %d] Gather+Scatter D verify FAILED:\n", rank);
+                }
+                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n",
+                        i, expected_val[i], dst[i]);
+                errors++;
+            }
+            verified++;
+        }
+    }
+    
+    free(write_count);
+    free(expected_val);
     return errors;
 }
 
@@ -923,6 +1334,14 @@ int main(int argc, char *argv[]) {
             verify_result = verify_gather_ld1w_ld1w(a, b, c, rank);
         } else if (test->func == sve_gather_ld1sw_ld1d) {
             verify_result = verify_gather_ld1sw_ld1d(a, b, c, rank);
+        } else if (test->func == sve_scatter_st1w) {
+            verify_result = verify_scatter_st1w(a, b, c, rank);
+        } else if (test->func == sve_scatter_st1d) {
+            verify_result = verify_scatter_st1d(a, b, c, rank);
+        } else if (test->func == sve_gather_scatter_w) {
+            verify_result = verify_gather_scatter_w(a, b, c, rank);
+        } else if (test->func == sve_gather_scatter_d) {
+            verify_result = verify_gather_scatter_d(a, b, c, rank);
         }
         
         if (rank == 0) {
