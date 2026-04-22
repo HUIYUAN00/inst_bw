@@ -1307,17 +1307,37 @@ static double run_test(test_item_t *test, void *a, void *b, void *c
 }
 
 int main(int argc, char *argv[]) {
+#ifdef USE_MPI
+    MPI_Init(&argc, &argv);
+    
+    int rank, nprocs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+#else
+    int rank = 0;
+#endif
+    
     int run_all = 1;
     int num_specs = 0;
     char **specs = NULL;
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            print_usage(argv[0]);
+            if (rank == 0) {
+                print_usage(argv[0]);
+            }
+#ifdef USE_MPI
+            MPI_Finalize();
+#endif
             return 0;
         }
         if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--list") == 0) {
-            print_tests();
+            if (rank == 0) {
+                print_tests();
+            }
+#ifdef USE_MPI
+            MPI_Finalize();
+#endif
             return 0;
         }
         if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--all") == 0) {
@@ -1339,27 +1359,33 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < test_count; i++) {
             should_run_test(i, num_specs, specs, selected_tests);
         }
+        
+#ifdef USE_MPI
+        int *root_selected = (int *)malloc(test_count * sizeof(int));
+        if (rank == 0) {
+            memcpy(root_selected, selected_tests, test_count * sizeof(int));
+        }
+        MPI_Bcast(root_selected, test_count, MPI_INT, 0, MPI_COMM_WORLD);
+        memcpy(selected_tests, root_selected, test_count * sizeof(int));
+        free(root_selected);
+#endif
+        
         int any_selected = 0;
         for (int i = 0; i < test_count; i++) {
             if (selected_tests[i]) any_selected = 1;
         }
         if (!any_selected) {
-            fprintf(stderr, "No tests match the specified criteria.\n");
-            print_tests();
+            if (rank == 0) {
+                fprintf(stderr, "No tests match the specified criteria.\n");
+                print_tests();
+            }
             free(selected_tests);
+#ifdef USE_MPI
+            MPI_Finalize();
+#endif
             return 1;
         }
     }
-    
-#ifdef USE_MPI
-    MPI_Init(&argc, &argv);
-    
-    int rank, nprocs;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
-#else
-    int rank = 0;
-#endif
     
     uint64_t vl = svcntb();
     
