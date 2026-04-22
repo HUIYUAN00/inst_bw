@@ -1,2 +1,3 @@
 sve_bw_test
+sve_bw_test_mpi
 *.o
