@@ -647,7 +647,6 @@ static void sve_gather_ld1w_ld1w(void *a, void *b, void *c, uint64_t size, doubl
 }
 
 static void sve_gather_ld1sw_ld1d(void *a, void *b, void *c, uint64_t size, double scalar) {
-    int32_t *src_sw = (int32_t *)b;
     double *src_d = (double *)c;
     double *dst = (double *)a;
     int32_t *idx_base = gather_indices;
@@ -666,27 +665,22 @@ static void sve_gather_ld1sw_ld1d(void *a, void *b, void *c, uint64_t size, doub
             "ld1sw z5.d, p0/z, [%[idx], #1, MUL VL]\n"
             "ld1sw z6.d, p0/z, [%[idx], #2, MUL VL]\n"
             "ld1sw z7.d, p0/z, [%[idx], #3, MUL VL]\n"
-            "ld1sw z8.d, p0/z, [%[sw], z4.d, lsl 2]\n"
-            "ld1sw z9.d, p0/z, [%[sw], z5.d, lsl 2]\n"
-            "ld1sw z10.d, p0/z, [%[sw], z6.d, lsl 2]\n"
-            "ld1sw z11.d, p0/z, [%[sw], z7.d, lsl 2]\n"
-            "ld1d z12.d, p0/z, [%[sd], z4.d, lsl 3]\n"
-            "ld1d z13.d, p0/z, [%[sd], z5.d, lsl 3]\n"
-            "ld1d z14.d, p0/z, [%[sd], z6.d, lsl 3]\n"
-            "ld1d z15.d, p0/z, [%[sd], z7.d, lsl 3]\n"
-            "st1d z12.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z13.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z14.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z15.d, p0, [%[d], #3, MUL VL]\n"
+            "ld1d z0.d, p0/z, [%[sd], z4.d, lsl 3]\n"
+            "ld1d z1.d, p0/z, [%[sd], z5.d, lsl 3]\n"
+            "ld1d z2.d, p0/z, [%[sd], z6.d, lsl 3]\n"
+            "ld1d z3.d, p0/z, [%[sd], z7.d, lsl 3]\n"
+            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
             "add %[idx], %[idx], %[inc]\n"
             "add %[d], %[d], %[incd]\n"
             : [idx] "+r" (idx_base), [d] "+r" (dst)
-            : [sw] "r" (src_sw), [sd] "r" (src_d), 
+            : [sd] "r" (src_d), 
               [inc] "r" (vl_d * 4 * sizeof(int32_t)),
               [incd] "r" (vl_d * 4 * sizeof(double))
             : "p0",
-              "z4", "z5", "z6", "z7",
-              "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
+              "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
         );
     }
 }
@@ -914,7 +908,7 @@ static test_item_t test_registry[] = {
     {"SVE LD1D+ST1D (Copy)", "Copy",    sve_ld1d_st1d_copy,   BUFFER_SIZE * 2,  0, 0},
     
     {"SVE Gather LD1W",      "Gather",  sve_gather_ld1w_ld1w, BUFFER_SIZE * 2,  0, 0},
-    {"SVE Gather LD1SW+LD1D","Gather",  sve_gather_ld1sw_ld1d,BUFFER_SIZE * 3,  1, 0},
+    {"SVE Gather LD1SW+LD1D","Gather",  sve_gather_ld1sw_ld1d,BUFFER_SIZE * 2,  1, 0},
     {"SVE Scatter ST1W",     "Scatter", sve_scatter_st1w,     BUFFER_SIZE * 2,  0, 0},
     {"SVE Scatter ST1D",     "Scatter", sve_scatter_st1d,     BUFFER_SIZE * 2,  0, 0},
     {"SVE Gather+Scatter W", "GatherScatter", sve_gather_scatter_w, BUFFER_SIZE * 2,  0, 0},
