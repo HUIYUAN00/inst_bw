@@ -6,6 +6,10 @@
 #include <time.h>
 #include <arm_sve.h>
 
+#ifdef USE_MPI
+#include <mpi.h>
+#endif
+
 static int warmup_iter = 5;
 static int test_iter = 10;
 static uint64_t buffer_size = 128 * 1024 * 1024;
@@ -668,36 +672,70 @@ static int should_run_test(int test_idx, int num_specs, char **specs) {
 
 //=== End
 
-static double run_test(test_item_t *test, void *a, void *b, void *c) {
+static double run_test(test_item_t *test, void *a, void *b, void *c
+#ifdef USE_MPI
+    , MPI_Comm comm
+#endif
+) {
     struct timespec start, end;
     double scalar = 2.0;
+    
+#ifdef USE_MPI
+    MPI_Barrier(comm);
+#endif
     
     for (int i = 0; i < warmup_iter; i++) {
         test->func(a, b, c, buffer_size, scalar);
     }
     
+#ifdef USE_MPI
+    MPI_Barrier(comm);
+#endif
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (int i = 0; i < test_iter; i++) {
         test->func(a, b, c, buffer_size, scalar);
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
+#ifdef USE_MPI
+    MPI_Barrier(comm);
+#endif
     
     double time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     return time_sec / test_iter;
 }
 
 int main(int argc, char *argv[]) {
+#ifdef USE_MPI
+    MPI_Init(&argc, &argv);
+    
+    int rank, nprocs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+#else
+    int rank = 0;
+#endif
+    
     int run_all = 1;
     int num_specs = 0;
     char **specs = NULL;
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            print_usage(argv[0]);
+            if (rank == 0) {
+                print_usage(argv[0]);
+            }
+#ifdef USE_MPI
+            MPI_Finalize();
+#endif
             return 0;
         }
         if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--list") == 0) {
-            print_tests();
+            if (rank == 0) {
+                print_tests();
+            }
+#ifdef USE_MPI
+            MPI_Finalize();
+#endif
             return 0;
         }
         if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--buffer-size") == 0) {
@@ -732,17 +770,30 @@ int main(int argc, char *argv[]) {
         specs = &argv[argc - num_specs];
     }
     
+#ifdef USE_MPI
+    MPI_Bcast(&buffer_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&index_pool_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+#endif
+    
     uint64_t vl = svcntb();
     
-    printf("============================================================\n");
-    printf("SVE Gather/Scatter Bandwidth Benchmark\n");
-    printf("============================================================\n");
-    printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
-    printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
-    printf("Index Pool Size: %lu elements\n", index_pool_size);
-    printf("Warmup Iterations: %d\n", warmup_iter);
-    printf("Test Iterations: %d\n", test_iter);
-    printf("Registered Tests: %d\n\n", test_count);
+    if (rank == 0) {
+        printf("============================================================\n");
+#ifdef USE_MPI
+        printf("SVE Gather/Scatter Bandwidth Benchmark (MPI - %d processes)\n", nprocs);
+#else
+        printf("SVE Gather/Scatter Bandwidth Benchmark\n");
+#endif
+        printf("============================================================\n");
+        printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
+        printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
+        printf("Index Pool Size: %lu elements\n", index_pool_size);
+        printf("Warmup Iterations: %d\n", warmup_iter);
+        printf("Test Iterations: %d\n", test_iter);
+        printf("Registered Tests: %d\n\n", test_count);
+    }
     
     void *a = NULL, *b = NULL, *c = NULL;
     
@@ -750,7 +801,12 @@ int main(int argc, char *argv[]) {
         posix_memalign(&b, 64, buffer_size) != 0 ||
         posix_memalign(&c, 64, buffer_size) != 0 ||
         posix_memalign((void**)&gather_indices, 64, index_pool_size * sizeof(int32_t)) != 0) {
+#ifdef USE_MPI
+        fprintf(stderr, "[Rank %d] Failed to allocate aligned memory\n", rank);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+#else
         fprintf(stderr, "Failed to allocate aligned memory\n");
+#endif
         return 1;
     }
     
@@ -775,9 +831,16 @@ int main(int argc, char *argv[]) {
         dc[i] = 3.0;
     }
     
-    printf("%-22s %15s %10s %10s %10s\n", 
-           "Test", "Category", "GB/s", "Time(ms)", "Data(MB)");
-    printf("============================================================\n");
+    if (rank == 0) {
+#ifdef USE_MPI
+        printf("%-22s %15s %10s %10s %10s %10s\n", 
+               "Test", "Category", "GB/s", "Time(ms)", "Data(MB)", "Total(GB/s)");
+#else
+        printf("%-22s %15s %10s %10s %10s\n", 
+               "Test", "Category", "GB/s", "Time(ms)", "Data(MB)");
+#endif
+        printf("============================================================\n");
+    }
     
     for (int i = 0; i < test_count; i++) {
         if (!run_all && !should_run_test(i, num_specs, specs)) continue;
@@ -785,8 +848,17 @@ int main(int argc, char *argv[]) {
         test_item_t *test = &test_registry[i];
         uint64_t bytes_per_iter = buffer_size * 2;
         
+#ifdef USE_MPI
+        double time_sec = run_test(test, a, b, c, MPI_COMM_WORLD);
+#else
         double time_sec = run_test(test, a, b, c);
+#endif
         double bandwidth = get_bandwidth(bytes_per_iter, time_sec);
+        
+#ifdef USE_MPI
+        double total_bw = 0.0;
+        MPI_Reduce(&bandwidth, &total_bw, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+#endif
         
         int verify_result = 0;
         if (test->func == sve_gather_ld1w_ld1w) {
@@ -803,22 +875,34 @@ int main(int argc, char *argv[]) {
             verify_result = verify_gather_scatter_d(a, b, c);
         }
         
-        printf("%-22s %15s %10.2f %10.3f %10.0f",
-               test->name, test->category, bandwidth, time_sec * 1000,
-               (double)bytes_per_iter / (1024 * 1024));
-        
-        if (verify_result > 0) {
-            printf("  VERIFY_FAIL(%d)", verify_result);
+        if (rank == 0) {
+#ifdef USE_MPI
+            printf("%-22s %15s %10.2f %10.3f %10.0f %10.2f",
+                   test->name, test->category, bandwidth, time_sec * 1000,
+                   (double)bytes_per_iter / (1024 * 1024), total_bw);
+#else
+            printf("%-22s %15s %10.2f %10.3f %10.0f",
+                   test->name, test->category, bandwidth, time_sec * 1000,
+                   (double)bytes_per_iter / (1024 * 1024));
+#endif
+            if (verify_result > 0) {
+                printf("  VERIFY_FAIL(%d)", verify_result);
+            }
+            printf("\n");
         }
-        printf("\n");
     }
     
-    printf("============================================================\n");
+    if (rank == 0) {
+        printf("============================================================\n");
+    }
     
     free(a);
     free(b);
     free(c);
     free(gather_indices);
     
+#ifdef USE_MPI
+    MPI_Finalize();
+#endif
     return 0;
 }
