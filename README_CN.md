@@ -26,6 +26,9 @@ make sve_bw_test
 # 编译 MPI 版本
 make sve_bw_test_mpi
 
+# 编译 Gather/Scatter 独立版本
+make gather_scatter_test
+
 # 编译所有版本
 make all
 ```
@@ -81,6 +84,38 @@ make run         # MPI 4进程运行所有测试
 - 所有进程同步运行相同的测试项
 - 命令行参数由 rank 0 进程解析后广播到所有进程
 - 输出显示每个进程的带宽和所有进程的总带宽
+
+### Gather/Scatter 独立版本 (gather_scatter_test)
+
+```bash
+# 运行所有测试（默认参数）
+./gather_scatter_test
+
+# 参数控制
+./gather_scatter_test -b 64 -i 512          # 64MB 缓冲区，512K 下标池
+./gather_scatter_test -w 10 -t 50           # 10次预热，50次测试迭代
+./gather_scatter_test -b 256 Gather         # 256MB 缓冲区，运行 Gather 测试
+
+# 显示帮助
+./gather_scatter_test --help
+./gather_scatter_test --list
+
+# 使用 Makefile 快捷命令
+make run_gs    # 运行 gather_scatter_test
+```
+
+**Gather/Scatter 版本特点：**
+- 缓冲区大小、下标池大小可通过命令行参数配置
+- 支持按索引、名称、类别选择测试项
+- 内置结果验证机制
+- 详细文档见 `README_GATHER_SCATTER.md`
+
+| 参数 | 说明 | 默认值 |
+|-----|------|--------|
+| `-b <MB>` | 缓冲区大小 | 128 MB |
+| `-i <K>` | 下标池大小 | 1024 K |
+| `-w <N>` | 预热迭代次数 | 5 |
+| `-t <N>` | 测试迭代次数 | 10 |
 
 ## 测试项目详解
 
@@ -210,6 +245,14 @@ Gather 和 Scatter 相关测试包含结果验证，验证失败时会输出 `VE
 ```bash
 make clean
 ```
+
+## 相关文档
+
+| 文档 | 说明 |
+|------|------|
+| `README_CN.md` | 主文档 |
+| `README_GATHER_SCATTER.md` | Gather/Scatter 独立版本详细文档 |
+| `test_results.md` | 测试结果记录 |
 
 ## 许可证
 
