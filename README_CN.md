@@ -30,6 +30,9 @@ make sve_bw_test_mpi
 # 编译 Gather/Scatter 独立版本
 make gather_scatter_test
 
+# 编译 Gather/Scatter MPI 版本
+make gather_scatter_test_mpi
+
 # 编译所有版本
 make all
 ```
@@ -134,6 +137,34 @@ make run_gs    # 运行 gather_scatter_test
 | `-i <K>` | 下标池大小 | 1024 K |
 | `-w <N>` | 预热迭代次数 | 5 |
 | `-t <N>` | 测试迭代次数 | 10 |
+
+### Gather/Scatter MPI 多进程版本 (gather_scatter_test_mpi)
+
+```bash
+# 运行所有测试（4进程）
+mpirun -np 4 ./gather_scatter_test_mpi
+
+# 参数控制
+mpirun -np 4 ./gather_scatter_test_mpi -b 64 -i 512
+mpirun -np 4 ./gather_scatter_test_mpi -b 32 -w 3 -t 10
+
+# 运行指定测试项
+mpirun -np 4 ./gather_scatter_test_mpi Gather
+mpirun -np 4 ./gather_scatter_test_mpi 0 2 4
+
+# 显示帮助或列表
+mpirun -np 4 ./gather_scatter_test_mpi --help
+mpirun -np 4 ./gather_scatter_test_mpi --list
+
+# 使用 Makefile 快捷命令
+make run_gs_mpi    # MPI 4进程运行 gather_scatter_test_mpi
+```
+
+**Gather/Scatter MPI 版本特点：**
+- 所有进程同步运行相同的测试项
+- 命令行参数由 rank 0 进程解析后广播到所有进程
+- 输出显示每个进程的带宽和所有进程的总带宽
+- MPI_Barrier 确保 test 循环的同步执行
 
 ## 测试项目详解
 

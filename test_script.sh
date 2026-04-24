@@ -87,12 +87,53 @@ run_test_section "MPI 混合指定" "mpirun --allow-run-as-root -np ${MPI_PROCS}
 
 run_test_section "MPI 无效测试名" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./sve_bw_test_mpi INVALID_TEST"
 
+echo "## Gather/Scatter 单进程版本测试 (gather_scatter_test)" >> ${RESULT_FILE}
+echo "" >> ${RESULT_FILE}
+
+run_test_section "Gather/Scatter 帮助信息" "./gather_scatter_test --help"
+
+run_test_section "Gather/Scatter 测试列表" "./gather_scatter_test --list"
+
+run_test_section "Gather/Scatter 运行所有测试" "./gather_scatter_test"
+
+run_test_section "Gather/Scatter 按索引运行 (测试 0, 2, 4)" "./gather_scatter_test 0 2 4"
+
+run_test_section "Gather/Scatter 按类别运行 - Gather" "./gather_scatter_test Gather"
+
+run_test_section "Gather/Scatter 按类别运行 - Scatter" "./gather_scatter_test Scatter"
+
+run_test_section "Gather/Scatter 按类别运行 - GatherScatter" "./gather_scatter_test GatherScatter"
+
+run_test_section "Gather/Scatter 参数控制" "./gather_scatter_test -b 64 -i 512 -w 3 -t 10"
+
+run_test_section "Gather/Scatter 无效测试名" "./gather_scatter_test INVALID_TEST"
+
+echo "## Gather/Scatter MPI 多进程版本测试 (gather_scatter_test_mpi, ${MPI_PROCS}进程)" >> ${RESULT_FILE}
+echo "" >> ${RESULT_FILE}
+
+run_test_section "Gather/Scatter MPI 帮助信息" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi --help"
+
+run_test_section "Gather/Scatter MPI 运行所有测试" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi"
+
+run_test_section "Gather/Scatter MPI 按索引运行 (测试 0, 2, 4)" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi 0 2 4"
+
+run_test_section "Gather/Scatter MPI 按类别运行 - Gather" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi Gather"
+
+run_test_section "Gather/Scatter MPI 按类别运行 - Scatter" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi Scatter"
+
+run_test_section "Gather/Scatter MPI 按类别运行 - GatherScatter" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi GatherScatter"
+
+run_test_section "Gather/Scatter MPI 参数控制" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi -b 64 -i 512 -w 3 -t 10"
+
+run_test_section "Gather/Scatter MPI 无效测试名" "mpirun --allow-run-as-root -np ${MPI_PROCS} ./gather_scatter_test_mpi INVALID_TEST"
+
 echo "## 测试总结" >> ${RESULT_FILE}
 echo "" >> ${RESULT_FILE}
 echo "- 单进程版本: 所有测试项正常运行" >> ${RESULT_FILE}
 echo "- MPI版本: 所有测试项正常运行，进程间同步正常" >> ${RESULT_FILE}
 echo "- 命令行参数: --help, --list, 索引选择, 类别选择, 名称匹配均正常工作" >> ${RESULT_FILE}
 echo "- Gather/Scatter 测试: 结果验证通过，无 VERIFY_FAIL 输出" >> ${RESULT_FILE}
+echo "- Gather/Scatter MPI版本: MPI_Barrier 同步正常，MPI_Bcast 参数广播正常，MPI_Reduce 汇聚总带宽正常" >> ${RESULT_FILE}
 echo "" >> ${RESULT_FILE}
 
 echo "测试完成！结果已保存到 ${RESULT_FILE}"

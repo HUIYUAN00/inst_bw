@@ -9,11 +9,25 @@
 - **Gather+Scatter 组合测试**：测试完全非连续内存操作
 - **参数可配置**：缓冲区大小、下标池大小、迭代次数均可通过命令行控制
 - **结果验证**：内置结果验证机制，确保测试准确性
+- **MPI 支持**：支持多进程并行测试，汇总总带宽
+
+## 编译要求
+
+- ARM 架构处理器，支持 SVE 指令集
+- GCC 编译器
+- MPI 库（可选，用于并行测试）
 
 ## 编译
 
 ```bash
+# 编译单进程版本
 make gather_scatter_test
+
+# 编译 MPI 版本
+make gather_scatter_test_mpi
+
+# 编译所有版本
+make all
 ```
 
 ## 运行
@@ -47,6 +61,47 @@ make gather_scatter_test
 | `<index>` | 按索引号选择测试 (0-5) |
 | `<name>` | 按名称部分匹配 |
 | `<category>` | 按类别选择 (Gather/Scatter/GatherScatter) |
+
+## MPI 多进程版本 (gather_scatter_test_mpi)
+
+### 基本用法
+
+```bash
+# 运行所有测试（4进程）
+mpirun -np 4 ./gather_scatter_test_mpi
+
+# 显示帮助信息
+mpirun -np 4 ./gather_scatter_test_mpi --help
+
+# 列出所有测试项
+mpirun -np 4 ./gather_scatter_test_mpi --list
+
+# 使用 Makefile 快捷命令
+make run_gs_mpi
+```
+
+### MPI 参数控制
+
+MPI 版本支持与单进程版本相同的参数，命令行参数由 rank 0 进程解析后广播到所有进程：
+
+```bash
+# 参数控制
+mpirun -np 4 ./gather_scatter_test_mpi -b 64 -i 512
+mpirun -np 4 ./gather_scatter_test_mpi -b 32 -w 3 -t 10
+
+# 运行指定测试项
+mpirun -np 4 ./gather_scatter_test_mpi Gather
+mpirun -np 4 ./gather_scatter_test_mpi 0 2 4
+mpirun -np 4 ./gather_scatter_test_mpi Scatter
+```
+
+### MPI 版本特点
+
+- 所有进程同步运行相同的测试项
+- 使用 MPI_Barrier 在 warmup/test 循环前后同步
+- 配置参数通过 MPI_Bcast 广播到所有进程
+- 输出显示每个进程的带宽和所有进程的总带宽（Total(GB/s)）
+- 只有 rank 0 进程输出结果信息
 
 ## 测试项说明
 
@@ -86,7 +141,10 @@ make gather_scatter_test
 
 ## 输出说明
 
-``============================================================
+### 单进程版本输出
+
+```
+============================================================
 SVE Gather/Scatter Bandwidth Benchmark
 ============================================================
 SVE Vector Length: 32 bytes (256 bits)
@@ -106,6 +164,26 @@ SVE Gather LD1W                 Gather       3.60     74.497        256
 - **GB/s**: 带宽 (吉字节/秒)
 - **Time(ms)**: 单次测试执行时间 (毫秒)
 - **Data(MB)**: 单次测试处理的数据量 (兆字节)
+
+### MPI 多进程版本输出
+
+```
+============================================================
+SVE Gather/Scatter Bandwidth Benchmark (MPI - 4 processes)
+============================================================
+SVE Vector Length: 32 bytes (256 bits)
+Buffer Size: 128 MB per array
+Index Pool Size: 1048576 elements
+Warmup Iterations: 5
+Test Iterations: 10
+Registered Tests: 6
+
+Test                          Category       GB/s   Time(ms)   Data(MB) Total(GB/s)
+============================================================
+SVE Gather LD1W                 Gather       3.60     74.497        256      14.40
+```
+
+额外显示 **Total(GB/s)**：所有进程的总带宽之和
 
 ## 参数选择建议
 
