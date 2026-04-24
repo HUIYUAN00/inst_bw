@@ -421,6 +421,144 @@ static void sve_ld1d_st1d_copy(void *a, void *b, void *c, uint64_t size, double 
 
 //=== End
 
+//=== STREAM_TESTS
+
+static void stream_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
+    double *dst = (double *)a;
+    double *src = (double *)b;
+    uint64_t vl = svcntb();
+    uint64_t chunk_size = vl * 4;
+    uint64_t chunks = size / chunk_size;
+    for (uint64_t i = 0; i < chunks; i++) {
+        __asm__ volatile (
+            "ptrue p0.d\n"
+            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
+            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
+            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
+            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
+            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
+            "add %[s], %[s], %[inc]\n"
+            "add %[d], %[d], %[inc]\n"
+            : [s] "+r" (src), [d] "+r" (dst)
+            : [inc] "r" (chunk_size)
+            : "p0", "z0", "z1", "z2", "z3", "memory"
+        );
+    }
+}
+
+static void stream_scale(void *a, void *b, void *c, uint64_t size, double scalar) {
+    double *dst = (double *)a;
+    double *src = (double *)b;
+    uint64_t vl = svcntb();
+    uint64_t chunk_size = vl * 4;
+    uint64_t chunks = size / chunk_size;
+    svfloat64_t scale_vec = svdup_f64(scalar);
+    for (uint64_t i = 0; i < chunks; i++) {
+        __asm__ volatile (
+            "ptrue p0.d\n"
+            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
+            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
+            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
+            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
+            "fmul z0.d, p0/m, z0.d, %[k].d\n"
+            "fmul z1.d, p0/m, z1.d, %[k].d\n"
+            "fmul z2.d, p0/m, z2.d, %[k].d\n"
+            "fmul z3.d, p0/m, z3.d, %[k].d\n"
+            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
+            "add %[s], %[s], %[inc]\n"
+            "add %[d], %[d], %[inc]\n"
+            : [s] "+r" (src), [d] "+r" (dst)
+            : [inc] "r" (chunk_size), [k] "w" (scale_vec)
+            : "p0", "z0", "z1", "z2", "z3", "memory"
+        );
+    }
+}
+
+static void stream_add(void *a, void *b, void *c, uint64_t size, double scalar) {
+    double *dst = (double *)a;
+    double *src1 = (double *)b;
+    double *src2 = (double *)c;
+    uint64_t vl = svcntb();
+    uint64_t chunk_size = vl * 4;
+    uint64_t chunks = size / chunk_size;
+    for (uint64_t i = 0; i < chunks; i++) {
+        __asm__ volatile (
+            "ptrue p0.d\n"
+            "ld1d z0.d, p0/z, [%[s1], #0, MUL VL]\n"
+            "ld1d z1.d, p0/z, [%[s1], #1, MUL VL]\n"
+            "ld1d z2.d, p0/z, [%[s1], #2, MUL VL]\n"
+            "ld1d z3.d, p0/z, [%[s1], #3, MUL VL]\n"
+            "ld1d z4.d, p0/z, [%[s2], #0, MUL VL]\n"
+            "ld1d z5.d, p0/z, [%[s2], #1, MUL VL]\n"
+            "ld1d z6.d, p0/z, [%[s2], #2, MUL VL]\n"
+            "ld1d z7.d, p0/z, [%[s2], #3, MUL VL]\n"
+            "fadd z0.d, p0/m, z0.d, z4.d\n"
+            "fadd z1.d, p0/m, z1.d, z5.d\n"
+            "fadd z2.d, p0/m, z2.d, z6.d\n"
+            "fadd z3.d, p0/m, z3.d, z7.d\n"
+            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
+            "add %[s1], %[s1], %[inc]\n"
+            "add %[s2], %[s2], %[inc]\n"
+            "add %[d], %[d], %[inc]\n"
+            : [s1] "+r" (src1), [s2] "+r" (src2), [d] "+r" (dst)
+            : [inc] "r" (chunk_size)
+            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+        );
+    }
+}
+
+static void stream_triad(void *a, void *b, void *c, uint64_t size, double scalar) {
+    double *dst = (double *)a;
+    double *src1 = (double *)b;
+    double *src2 = (double *)c;
+    uint64_t vl = svcntb();
+    uint64_t chunk_size = vl * 4;
+    uint64_t chunks = size / chunk_size;
+    svfloat64_t scale_vec = svdup_f64(scalar);
+    for (uint64_t i = 0; i < chunks; i++) {
+        __asm__ volatile (
+            "ptrue p0.d\n"
+            "ld1d z0.d, p0/z, [%[s1], #0, MUL VL]\n"
+            "ld1d z1.d, p0/z, [%[s1], #1, MUL VL]\n"
+            "ld1d z2.d, p0/z, [%[s1], #2, MUL VL]\n"
+            "ld1d z3.d, p0/z, [%[s1], #3, MUL VL]\n"
+            "ld1d z4.d, p0/z, [%[s2], #0, MUL VL]\n"
+            "ld1d z5.d, p0/z, [%[s2], #1, MUL VL]\n"
+            "ld1d z6.d, p0/z, [%[s2], #2, MUL VL]\n"
+            "ld1d z7.d, p0/z, [%[s2], #3, MUL VL]\n"
+            "fmul z0.d, p0/m, z0.d, %[k].d\n"
+            "fmul z1.d, p0/m, z1.d, %[k].d\n"
+            "fmul z2.d, p0/m, z2.d, %[k].d\n"
+            "fmul z3.d, p0/m, z3.d, %[k].d\n"
+            "fadd z0.d, p0/m, z0.d, z4.d\n"
+            "fadd z1.d, p0/m, z1.d, z5.d\n"
+            "fadd z2.d, p0/m, z2.d, z6.d\n"
+            "fadd z3.d, p0/m, z3.d, z7.d\n"
+            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
+            "add %[s1], %[s1], %[inc]\n"
+            "add %[s2], %[s2], %[inc]\n"
+            "add %[d], %[d], %[inc]\n"
+            : [s1] "+r" (src1), [s2] "+r" (src2), [d] "+r" (dst)
+            : [inc] "r" (chunk_size), [k] "w" (scale_vec)
+            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+        );
+    }
+}
+
+//=== End
+
 #pragma GCC pop_options
 
 //=== TEST_REGISTRY
@@ -441,6 +579,11 @@ static test_item_t test_registry[] = {
     {"SVE LD1D (Read)",      "Load",    sve_ld1d_read,        0},
     {"SVE ST1D (Write)",     "Store",   sve_st1d_write,       0},
     {"SVE LD1D+ST1D (Copy)", "Copy",    sve_ld1d_st1d_copy,   0},
+    
+    {"STREAM Copy",          "STREAM",  stream_copy,          0},
+    {"STREAM Scale",         "STREAM",  stream_scale,         0},
+    {"STREAM Add",           "STREAM",  stream_add,           0},
+    {"STREAM Triad",         "STREAM",  stream_triad,         0},
 };
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);
@@ -457,7 +600,7 @@ static void print_usage(const char *prog_name) {
     printf("  <index>                 Run test by index (0-based)\n");
     printf("  <name>                  Run test by name (partial match)\n");
     printf("  <category>              Run all tests in a category\n");
-    printf("\nCategories: Load, Store, Copy\n");
+    printf("\nCategories: Load, Store, Copy, STREAM\n");
     printf("\nExamples:\n");
     printf("  %s                               Run all tests\n", prog_name);
     printf("  %s -b 64                         Use 64MB buffer\n", prog_name);
@@ -653,6 +796,13 @@ int main(int argc, char *argv[]) {
         uint64_t bytes_per_iter = buffer_size;
         if (strcmp(test->category, "Copy") == 0) {
             bytes_per_iter = buffer_size * 2;
+        }
+        if (strcmp(test->category, "STREAM") == 0) {
+            if (strstr(test->name, "Copy") != NULL || strstr(test->name, "Scale") != NULL) {
+                bytes_per_iter = buffer_size * 2;
+            } else if (strstr(test->name, "Add") != NULL || strstr(test->name, "Triad") != NULL) {
+                bytes_per_iter = buffer_size * 3;
+            }
         }
         
 #ifdef USE_MPI
