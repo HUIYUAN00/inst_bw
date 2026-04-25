@@ -33,23 +33,25 @@ static inline double get_bandwidth(uint64_t bytes, double time_sec) {
 static void neon_ldp_read(void *a, void *b, void *c, uint64_t size, double scalar) {
     float *src = (float *)a;
     uint64_t chunks = size / 256;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ldp q0, q1, [%[s], #0]\n"
-            "ldp q2, q3, [%[s], #32]\n"
-            "ldp q4, q5, [%[s], #64]\n"
-            "ldp q6, q7, [%[s], #96]\n"
-            "ldp q8, q9, [%[s], #128]\n"
-            "ldp q10, q11, [%[s], #160]\n"
-            "ldp q12, q13, [%[s], #192]\n"
-            "ldp q14, q15, [%[s], #224]\n"
-            "add %[s], %[s], #256\n"
-            : [s] "+r" (src)
-            :
-            : "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7",
-              "q8", "q9", "q10", "q11", "q12", "q13", "q14", "q15", "memory"
-        );
-    }
+    __asm__ volatile (
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ldp q0, q1, [%[s], #0]\n"
+        "ldp q2, q3, [%[s], #32]\n"
+        "ldp q4, q5, [%[s], #64]\n"
+        "ldp q6, q7, [%[s], #96]\n"
+        "ldp q8, q9, [%[s], #128]\n"
+        "ldp q10, q11, [%[s], #160]\n"
+        "ldp q12, q13, [%[s], #192]\n"
+        "ldp q14, q15, [%[s], #224]\n"
+        "add %[s], %[s], #256\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src)
+        : [cnt] "r" (chunks)
+        : "x0", "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7",
+          "q8", "q9", "q10", "q11", "q12", "q13", "q14", "q15", "memory"
+    );
 }
 
 static void neon_stp_write(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -72,51 +74,49 @@ static void neon_stp_write(void *a, void *b, void *c, uint64_t size, double scal
         "movi v13.4s, #14\n"
         "movi v14.4s, #15\n"
         "movi v15.4s, #16\n"
-        :
-        :
-        : "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7",
-          "q8", "q9", "q10", "q11", "q12", "q13", "q14", "q15"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "stp q0, q1, [%[d], #0]\n"
+        "stp q2, q3, [%[d], #32]\n"
+        "stp q4, q5, [%[d], #64]\n"
+        "stp q6, q7, [%[d], #96]\n"
+        "stp q8, q9, [%[d], #128]\n"
+        "stp q10, q11, [%[d], #160]\n"
+        "stp q12, q13, [%[d], #192]\n"
+        "stp q14, q15, [%[d], #224]\n"
+        "add %[d], %[d], #256\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [d] "+r" (dst)
+        : [cnt] "r" (chunks)
+        : "x0", "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7",
+          "q8", "q9", "q10", "q11", "q12", "q13", "q14", "q15", "memory"
     );
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "stp q0, q1, [%[d], #0]\n"
-            "stp q2, q3, [%[d], #32]\n"
-            "stp q4, q5, [%[d], #64]\n"
-            "stp q6, q7, [%[d], #96]\n"
-            "stp q8, q9, [%[d], #128]\n"
-            "stp q10, q11, [%[d], #160]\n"
-            "stp q12, q13, [%[d], #192]\n"
-            "stp q14, q15, [%[d], #224]\n"
-            "add %[d], %[d], #256\n"
-            : [d] "+r" (dst)
-            :
-            : "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7",
-              "q8", "q9", "q10", "q11", "q12", "q13", "q14", "q15", "memory"
-        );
-    }
 }
 
 static void neon_ldp_stp_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
     float *src = (float *)b;
     float *dst = (float *)a;
     uint64_t chunks = size / 128;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ldp q0, q1, [%[s], #0]\n"
-            "ldp q2, q3, [%[s], #32]\n"
-            "ldp q4, q5, [%[s], #64]\n"
-            "ldp q6, q7, [%[s], #96]\n"
-            "stp q0, q1, [%[d], #0]\n"
-            "stp q2, q3, [%[d], #32]\n"
-            "stp q4, q5, [%[d], #64]\n"
-            "stp q6, q7, [%[d], #96]\n"
-            "add %[s], %[s], #128\n"
-            "add %[d], %[d], #128\n"
-            : [s] "+r" (src), [d] "+r" (dst)
-            :
-            : "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "memory"
-        );
-    }
+    __asm__ volatile (
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ldp q0, q1, [%[s], #0]\n"
+        "ldp q2, q3, [%[s], #32]\n"
+        "ldp q4, q5, [%[s], #64]\n"
+        "ldp q6, q7, [%[s], #96]\n"
+        "stp q0, q1, [%[d], #0]\n"
+        "stp q2, q3, [%[d], #32]\n"
+        "stp q4, q5, [%[d], #64]\n"
+        "stp q6, q7, [%[d], #96]\n"
+        "add %[s], %[s], #128\n"
+        "add %[d], %[d], #128\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src), [d] "+r" (dst)
+        : [cnt] "r" (chunks)
+        : "x0", "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "memory"
+    );
 }
 
 //=== End
@@ -128,23 +128,25 @@ static void sve_ld1b_read(void *a, void *b, void *c, uint64_t size, double scala
     uint64_t vl = svcntb();
     uint64_t chunk_size = vl * 8;
     uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.b\n"
-            "ld1b z0.b, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1b z1.b, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1b z2.b, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1b z3.b, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1b z4.b, p0/z, [%[s], #4, MUL VL]\n"
-            "ld1b z5.b, p0/z, [%[s], #5, MUL VL]\n"
-            "ld1b z6.b, p0/z, [%[s], #6, MUL VL]\n"
-            "ld1b z7.b, p0/z, [%[s], #7, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            : [s] "+r" (src)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
+    __asm__ volatile (
+        "ptrue p0.b\n"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ld1b z0.b, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1b z1.b, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1b z2.b, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1b z3.b, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1b z4.b, p0/z, [%[s], #4, MUL VL]\n"
+        "ld1b z5.b, p0/z, [%[s], #5, MUL VL]\n"
+        "ld1b z6.b, p0/z, [%[s], #6, MUL VL]\n"
+        "ld1b z7.b, p0/z, [%[s], #7, MUL VL]\n"
+        "add %[s], %[s], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+    );
 }
 
 static void sve_st1b_write(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -162,27 +164,23 @@ static void sve_st1b_write(void *a, void *b, void *c, uint64_t size, double scal
         "mov z5.b, #6\n"
         "mov z6.b, #7\n"
         "mov z7.b, #8\n"
-        :
-        :
-        : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "st1b z0.b, p0, [%[d], #0, MUL VL]\n"
+        "st1b z1.b, p0, [%[d], #1, MUL VL]\n"
+        "st1b z2.b, p0, [%[d], #2, MUL VL]\n"
+        "st1b z3.b, p0, [%[d], #3, MUL VL]\n"
+        "st1b z4.b, p0, [%[d], #4, MUL VL]\n"
+        "st1b z5.b, p0, [%[d], #5, MUL VL]\n"
+        "st1b z6.b, p0, [%[d], #6, MUL VL]\n"
+        "st1b z7.b, p0, [%[d], #7, MUL VL]\n"
+        "add %[d], %[d], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [d] "+r" (dst)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
     );
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.b\n"
-            "st1b z0.b, p0, [%[d], #0, MUL VL]\n"
-            "st1b z1.b, p0, [%[d], #1, MUL VL]\n"
-            "st1b z2.b, p0, [%[d], #2, MUL VL]\n"
-            "st1b z3.b, p0, [%[d], #3, MUL VL]\n"
-            "st1b z4.b, p0, [%[d], #4, MUL VL]\n"
-            "st1b z5.b, p0, [%[d], #5, MUL VL]\n"
-            "st1b z6.b, p0, [%[d], #6, MUL VL]\n"
-            "st1b z7.b, p0, [%[d], #7, MUL VL]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
 }
 
 static void sve_ld1b_st1b_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -191,32 +189,34 @@ static void sve_ld1b_st1b_copy(void *a, void *b, void *c, uint64_t size, double 
     uint64_t vl = svcntb();
     uint64_t chunk_size = vl * 8;
     uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.b\n"
-            "ld1b z0.b, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1b z1.b, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1b z2.b, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1b z3.b, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1b z4.b, p0/z, [%[s], #4, MUL VL]\n"
-            "ld1b z5.b, p0/z, [%[s], #5, MUL VL]\n"
-            "ld1b z6.b, p0/z, [%[s], #6, MUL VL]\n"
-            "ld1b z7.b, p0/z, [%[s], #7, MUL VL]\n"
-            "st1b z0.b, p0, [%[d], #0, MUL VL]\n"
-            "st1b z1.b, p0, [%[d], #1, MUL VL]\n"
-            "st1b z2.b, p0, [%[d], #2, MUL VL]\n"
-            "st1b z3.b, p0, [%[d], #3, MUL VL]\n"
-            "st1b z4.b, p0, [%[d], #4, MUL VL]\n"
-            "st1b z5.b, p0, [%[d], #5, MUL VL]\n"
-            "st1b z6.b, p0, [%[d], #6, MUL VL]\n"
-            "st1b z7.b, p0, [%[d], #7, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [s] "+r" (src), [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
+    __asm__ volatile (
+        "ptrue p0.b\n"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ld1b z0.b, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1b z1.b, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1b z2.b, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1b z3.b, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1b z4.b, p0/z, [%[s], #4, MUL VL]\n"
+        "ld1b z5.b, p0/z, [%[s], #5, MUL VL]\n"
+        "ld1b z6.b, p0/z, [%[s], #6, MUL VL]\n"
+        "ld1b z7.b, p0/z, [%[s], #7, MUL VL]\n"
+        "st1b z0.b, p0, [%[d], #0, MUL VL]\n"
+        "st1b z1.b, p0, [%[d], #1, MUL VL]\n"
+        "st1b z2.b, p0, [%[d], #2, MUL VL]\n"
+        "st1b z3.b, p0, [%[d], #3, MUL VL]\n"
+        "st1b z4.b, p0, [%[d], #4, MUL VL]\n"
+        "st1b z5.b, p0, [%[d], #5, MUL VL]\n"
+        "st1b z6.b, p0, [%[d], #6, MUL VL]\n"
+        "st1b z7.b, p0, [%[d], #7, MUL VL]\n"
+        "add %[s], %[s], %[inc]\n"
+        "add %[d], %[d], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src), [d] "+r" (dst)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+    );
 }
 
 //=== End
@@ -228,23 +228,25 @@ static void sve_ld1w_read(void *a, void *b, void *c, uint64_t size, double scala
     uint64_t vl = svcntb();
     uint64_t chunk_size = vl * 8;
     uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.s\n"
-            "ld1w z0.s, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1w z1.s, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1w z2.s, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1w z3.s, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
-            "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
-            "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
-            "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            : [s] "+r" (src)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
+    __asm__ volatile (
+        "ptrue p0.s\n"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ld1w z0.s, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1w z1.s, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1w z2.s, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1w z3.s, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
+        "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
+        "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
+        "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
+        "add %[s], %[s], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+    );
 }
 
 static void sve_st1w_write(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -262,27 +264,23 @@ static void sve_st1w_write(void *a, void *b, void *c, uint64_t size, double scal
         "mov z5.s, #6\n"
         "mov z6.s, #7\n"
         "mov z7.s, #8\n"
-        :
-        :
-        : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "st1w z0.s, p0, [%[d], #0, MUL VL]\n"
+        "st1w z1.s, p0, [%[d], #1, MUL VL]\n"
+        "st1w z2.s, p0, [%[d], #2, MUL VL]\n"
+        "st1w z3.s, p0, [%[d], #3, MUL VL]\n"
+        "st1w z4.s, p0, [%[d], #4, MUL VL]\n"
+        "st1w z5.s, p0, [%[d], #5, MUL VL]\n"
+        "st1w z6.s, p0, [%[d], #6, MUL VL]\n"
+        "st1w z7.s, p0, [%[d], #7, MUL VL]\n"
+        "add %[d], %[d], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [d] "+r" (dst)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
     );
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.s\n"
-            "st1w z0.s, p0, [%[d], #0, MUL VL]\n"
-            "st1w z1.s, p0, [%[d], #1, MUL VL]\n"
-            "st1w z2.s, p0, [%[d], #2, MUL VL]\n"
-            "st1w z3.s, p0, [%[d], #3, MUL VL]\n"
-            "st1w z4.s, p0, [%[d], #4, MUL VL]\n"
-            "st1w z5.s, p0, [%[d], #5, MUL VL]\n"
-            "st1w z6.s, p0, [%[d], #6, MUL VL]\n"
-            "st1w z7.s, p0, [%[d], #7, MUL VL]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
 }
 
 static void sve_ld1w_st1w_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -291,32 +289,34 @@ static void sve_ld1w_st1w_copy(void *a, void *b, void *c, uint64_t size, double 
     uint64_t vl = svcntb();
     uint64_t chunk_size = vl * 8;
     uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.s\n"
-            "ld1w z0.s, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1w z1.s, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1w z2.s, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1w z3.s, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
-            "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
-            "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
-            "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
-            "st1w z0.s, p0, [%[d], #0, MUL VL]\n"
-            "st1w z1.s, p0, [%[d], #1, MUL VL]\n"
-            "st1w z2.s, p0, [%[d], #2, MUL VL]\n"
-            "st1w z3.s, p0, [%[d], #3, MUL VL]\n"
-            "st1w z4.s, p0, [%[d], #4, MUL VL]\n"
-            "st1w z5.s, p0, [%[d], #5, MUL VL]\n"
-            "st1w z6.s, p0, [%[d], #6, MUL VL]\n"
-            "st1w z7.s, p0, [%[d], #7, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [s] "+r" (src), [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
+    __asm__ volatile (
+        "ptrue p0.s\n"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ld1w z0.s, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1w z1.s, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1w z2.s, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1w z3.s, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
+        "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
+        "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
+        "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
+        "st1w z0.s, p0, [%[d], #0, MUL VL]\n"
+        "st1w z1.s, p0, [%[d], #1, MUL VL]\n"
+        "st1w z2.s, p0, [%[d], #2, MUL VL]\n"
+        "st1w z3.s, p0, [%[d], #3, MUL VL]\n"
+        "st1w z4.s, p0, [%[d], #4, MUL VL]\n"
+        "st1w z5.s, p0, [%[d], #5, MUL VL]\n"
+        "st1w z6.s, p0, [%[d], #6, MUL VL]\n"
+        "st1w z7.s, p0, [%[d], #7, MUL VL]\n"
+        "add %[s], %[s], %[inc]\n"
+        "add %[d], %[d], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src), [d] "+r" (dst)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+    );
 }
 
 //=== End
@@ -328,23 +328,25 @@ static void sve_ld1d_read(void *a, void *b, void *c, uint64_t size, double scala
     uint64_t vl = svcntb();
     uint64_t chunk_size = vl * 8;
     uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1d z4.d, p0/z, [%[s], #4, MUL VL]\n"
-            "ld1d z5.d, p0/z, [%[s], #5, MUL VL]\n"
-            "ld1d z6.d, p0/z, [%[s], #6, MUL VL]\n"
-            "ld1d z7.d, p0/z, [%[s], #7, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            : [s] "+r" (src)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
+    __asm__ volatile (
+        "ptrue p0.d\n"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1d z4.d, p0/z, [%[s], #4, MUL VL]\n"
+        "ld1d z5.d, p0/z, [%[s], #5, MUL VL]\n"
+        "ld1d z6.d, p0/z, [%[s], #6, MUL VL]\n"
+        "ld1d z7.d, p0/z, [%[s], #7, MUL VL]\n"
+        "add %[s], %[s], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+    );
 }
 
 static void sve_st1d_write(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -362,27 +364,23 @@ static void sve_st1d_write(void *a, void *b, void *c, uint64_t size, double scal
         "mov z5.d, #6\n"
         "mov z6.d, #7\n"
         "mov z7.d, #8\n"
-        :
-        :
-        : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+        "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+        "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+        "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
+        "st1d z4.d, p0, [%[d], #4, MUL VL]\n"
+        "st1d z5.d, p0, [%[d], #5, MUL VL]\n"
+        "st1d z6.d, p0, [%[d], #6, MUL VL]\n"
+        "st1d z7.d, p0, [%[d], #7, MUL VL]\n"
+        "add %[d], %[d], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [d] "+r" (dst)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
     );
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
-            "st1d z4.d, p0, [%[d], #4, MUL VL]\n"
-            "st1d z5.d, p0, [%[d], #5, MUL VL]\n"
-            "st1d z6.d, p0, [%[d], #6, MUL VL]\n"
-            "st1d z7.d, p0, [%[d], #7, MUL VL]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
 }
 
 static void sve_ld1d_st1d_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -391,32 +389,34 @@ static void sve_ld1d_st1d_copy(void *a, void *b, void *c, uint64_t size, double 
     uint64_t vl = svcntb();
     uint64_t chunk_size = vl * 8;
     uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1d z4.d, p0/z, [%[s], #4, MUL VL]\n"
-            "ld1d z5.d, p0/z, [%[s], #5, MUL VL]\n"
-            "ld1d z6.d, p0/z, [%[s], #6, MUL VL]\n"
-            "ld1d z7.d, p0/z, [%[s], #7, MUL VL]\n"
-            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
-            "st1d z4.d, p0, [%[d], #4, MUL VL]\n"
-            "st1d z5.d, p0, [%[d], #5, MUL VL]\n"
-            "st1d z6.d, p0, [%[d], #6, MUL VL]\n"
-            "st1d z7.d, p0, [%[d], #7, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [s] "+r" (src), [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
+    __asm__ volatile (
+        "ptrue p0.d\n"
+        "mov x0, %[cnt]\n"
+        "0:\n"
+        "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1d z4.d, p0/z, [%[s], #4, MUL VL]\n"
+        "ld1d z5.d, p0/z, [%[s], #5, MUL VL]\n"
+        "ld1d z6.d, p0/z, [%[s], #6, MUL VL]\n"
+        "ld1d z7.d, p0/z, [%[s], #7, MUL VL]\n"
+        "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+        "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+        "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+        "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
+        "st1d z4.d, p0, [%[d], #4, MUL VL]\n"
+        "st1d z5.d, p0, [%[d], #5, MUL VL]\n"
+        "st1d z6.d, p0, [%[d], #6, MUL VL]\n"
+        "st1d z7.d, p0, [%[d], #7, MUL VL]\n"
+        "add %[s], %[s], %[inc]\n"
+        "add %[d], %[d], %[inc]\n"
+        "subs x0, x0, #1\n"
+        "b.ne 0b\n"
+        : [s] "+r" (src), [d] "+r" (dst)
+        : [cnt] "r" (chunks), [inc] "r" (chunk_size)
+        : "x0", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+    );
 }
 
 //=== End
@@ -426,57 +426,18 @@ static void sve_ld1d_st1d_copy(void *a, void *b, void *c, uint64_t size, double 
 static void stream_copy(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *dst = (double *)a;
     double *src = (double *)b;
-    uint64_t vl = svcntb();
-    uint64_t chunk_size = vl * 4;
-    uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
-            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [s] "+r" (src), [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "memory"
-        );
+    uint64_t count = size / sizeof(double);
+    for (uint64_t i = 0; i < count; i++) {
+        dst[i] = src[i];
     }
 }
 
 static void stream_scale(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *dst = (double *)a;
     double *src = (double *)b;
-    uint64_t vl = svcntb();
-    uint64_t chunk_size = vl * 4;
-    uint64_t chunks = size / chunk_size;
-    svfloat64_t scale_vec = svdup_f64(scalar);
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
-            "fmul z0.d, p0/m, z0.d, %[k].d\n"
-            "fmul z1.d, p0/m, z1.d, %[k].d\n"
-            "fmul z2.d, p0/m, z2.d, %[k].d\n"
-            "fmul z3.d, p0/m, z3.d, %[k].d\n"
-            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
-            "add %[s], %[s], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [s] "+r" (src), [d] "+r" (dst)
-            : [inc] "r" (chunk_size), [k] "w" (scale_vec)
-            : "p0", "z0", "z1", "z2", "z3", "memory"
-        );
+    uint64_t count = size / sizeof(double);
+    for (uint64_t i = 0; i < count; i++) {
+        dst[i] = src[i] * scalar;
     }
 }
 
@@ -484,35 +445,9 @@ static void stream_add(void *a, void *b, void *c, uint64_t size, double scalar) 
     double *dst = (double *)a;
     double *src1 = (double *)b;
     double *src2 = (double *)c;
-    uint64_t vl = svcntb();
-    uint64_t chunk_size = vl * 4;
-    uint64_t chunks = size / chunk_size;
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1d z0.d, p0/z, [%[s1], #0, MUL VL]\n"
-            "ld1d z1.d, p0/z, [%[s1], #1, MUL VL]\n"
-            "ld1d z2.d, p0/z, [%[s1], #2, MUL VL]\n"
-            "ld1d z3.d, p0/z, [%[s1], #3, MUL VL]\n"
-            "ld1d z4.d, p0/z, [%[s2], #0, MUL VL]\n"
-            "ld1d z5.d, p0/z, [%[s2], #1, MUL VL]\n"
-            "ld1d z6.d, p0/z, [%[s2], #2, MUL VL]\n"
-            "ld1d z7.d, p0/z, [%[s2], #3, MUL VL]\n"
-            "fadd z0.d, p0/m, z0.d, z4.d\n"
-            "fadd z1.d, p0/m, z1.d, z5.d\n"
-            "fadd z2.d, p0/m, z2.d, z6.d\n"
-            "fadd z3.d, p0/m, z3.d, z7.d\n"
-            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
-            "add %[s1], %[s1], %[inc]\n"
-            "add %[s2], %[s2], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [s1] "+r" (src1), [s2] "+r" (src2), [d] "+r" (dst)
-            : [inc] "r" (chunk_size)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
+    uint64_t count = size / sizeof(double);
+    for (uint64_t i = 0; i < count; i++) {
+        dst[i] = src1[i] + src2[i];
     }
 }
 
@@ -520,40 +455,9 @@ static void stream_triad(void *a, void *b, void *c, uint64_t size, double scalar
     double *dst = (double *)a;
     double *src1 = (double *)b;
     double *src2 = (double *)c;
-    uint64_t vl = svcntb();
-    uint64_t chunk_size = vl * 4;
-    uint64_t chunks = size / chunk_size;
-    svfloat64_t scale_vec = svdup_f64(scalar);
-    for (uint64_t i = 0; i < chunks; i++) {
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1d z0.d, p0/z, [%[s1], #0, MUL VL]\n"
-            "ld1d z1.d, p0/z, [%[s1], #1, MUL VL]\n"
-            "ld1d z2.d, p0/z, [%[s1], #2, MUL VL]\n"
-            "ld1d z3.d, p0/z, [%[s1], #3, MUL VL]\n"
-            "ld1d z4.d, p0/z, [%[s2], #0, MUL VL]\n"
-            "ld1d z5.d, p0/z, [%[s2], #1, MUL VL]\n"
-            "ld1d z6.d, p0/z, [%[s2], #2, MUL VL]\n"
-            "ld1d z7.d, p0/z, [%[s2], #3, MUL VL]\n"
-            "fmul z0.d, p0/m, z0.d, %[k].d\n"
-            "fmul z1.d, p0/m, z1.d, %[k].d\n"
-            "fmul z2.d, p0/m, z2.d, %[k].d\n"
-            "fmul z3.d, p0/m, z3.d, %[k].d\n"
-            "fadd z0.d, p0/m, z0.d, z4.d\n"
-            "fadd z1.d, p0/m, z1.d, z5.d\n"
-            "fadd z2.d, p0/m, z2.d, z6.d\n"
-            "fadd z3.d, p0/m, z3.d, z7.d\n"
-            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
-            "add %[s1], %[s1], %[inc]\n"
-            "add %[s2], %[s2], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [s1] "+r" (src1), [s2] "+r" (src2), [d] "+r" (dst)
-            : [inc] "r" (chunk_size), [k] "w" (scale_vec)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
+    uint64_t count = size / sizeof(double);
+    for (uint64_t i = 0; i < count; i++) {
+        dst[i] = src1[i] + scalar * src2[i];
     }
 }
 
