@@ -13,7 +13,9 @@
 static int warmup_iter = 5;
 static int test_iter = 10;
 static uint64_t buffer_size = 128 * 1024 * 1024;
-static uint64_t index_pool_size = 1024 * 1024;
+static double sparsity = 0.01;
+static int index_mode = 0;
+static uint64_t index_pool_size = 0;
 static int32_t *gather_indices = NULL;
 
 typedef struct {
@@ -42,44 +44,57 @@ static void sve_gather_ld1w_ld1w(void *a, void *b, void *c, uint64_t size, doubl
     uint64_t chunk_bytes = vl * 8 * sizeof(int32_t);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / (vl * 8);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i % idx_pool_iters == 0) idx_base = gather_indices;
-        
-        __asm__ volatile (
-            "ptrue p0.s\n"
-            "ld1w z8.s, p0/z, [%[idx], #0, MUL VL]\n"
-            "ld1w z9.s, p0/z, [%[idx], #1, MUL VL]\n"
-            "ld1w z10.s, p0/z, [%[idx], #2, MUL VL]\n"
-            "ld1w z11.s, p0/z, [%[idx], #3, MUL VL]\n"
-            "ld1w z0.s, p0/z, [%[s], z8.s, sxtw 2]\n"
-            "ld1w z1.s, p0/z, [%[s], z9.s, sxtw 2]\n"
-            "ld1w z2.s, p0/z, [%[s], z10.s, sxtw 2]\n"
-            "ld1w z3.s, p0/z, [%[s], z11.s, sxtw 2]\n"
-            "ld1w z12.s, p0/z, [%[idx], #4, MUL VL]\n"
-            "ld1w z13.s, p0/z, [%[idx], #5, MUL VL]\n"
-            "ld1w z14.s, p0/z, [%[idx], #6, MUL VL]\n"
-            "ld1w z15.s, p0/z, [%[idx], #7, MUL VL]\n"
-            "ld1w z4.s, p0/z, [%[s], z12.s, sxtw 2]\n"
-            "ld1w z5.s, p0/z, [%[s], z13.s, sxtw 2]\n"
-            "ld1w z6.s, p0/z, [%[s], z14.s, sxtw 2]\n"
-            "ld1w z7.s, p0/z, [%[s], z15.s, sxtw 2]\n"
-            "st1w z0.s, p0, [%[d], #0, MUL VL]\n"
-            "st1w z1.s, p0, [%[d], #1, MUL VL]\n"
-            "st1w z2.s, p0, [%[d], #2, MUL VL]\n"
-            "st1w z3.s, p0, [%[d], #3, MUL VL]\n"
-            "st1w z4.s, p0, [%[d], #4, MUL VL]\n"
-            "st1w z5.s, p0, [%[d], #5, MUL VL]\n"
-            "st1w z6.s, p0, [%[d], #6, MUL VL]\n"
-            "st1w z7.s, p0, [%[d], #7, MUL VL]\n"
-            "add %[idx], %[idx], %[inc]\n"
-            "add %[d], %[d], %[inc]\n"
-            : [idx] "+r" (idx_base), [d] "+r" (dst)
-            : [s] "r" (src), [inc] "r" (chunk_bytes)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
-              "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
-        );
-    }
+    __asm__ volatile (
+        "mov x16, %[iter]\n"
+        "mov x17, #0\n"
+        "mov x18, %[idx_reset]\n"
+        "mov x19, %[inc]\n"
+        "mov x20, %[idx]\n"
+        "1:\n"
+        "cmp x17, #0\n"
+        "b.ne 2f\n"
+        "mov x20, x18\n"
+        "mov x17, %[reset]\n"
+        "2:\n"
+        "ptrue p0.s\n"
+        "ld1w z8.s, p0/z, [x20, #0, MUL VL]\n"
+        "ld1w z9.s, p0/z, [x20, #1, MUL VL]\n"
+        "ld1w z10.s, p0/z, [x20, #2, MUL VL]\n"
+        "ld1w z11.s, p0/z, [x20, #3, MUL VL]\n"
+        "ld1w z0.s, p0/z, [%[s], z8.s, sxtw 2]\n"
+        "ld1w z1.s, p0/z, [%[s], z9.s, sxtw 2]\n"
+        "ld1w z2.s, p0/z, [%[s], z10.s, sxtw 2]\n"
+        "ld1w z3.s, p0/z, [%[s], z11.s, sxtw 2]\n"
+        "ld1w z12.s, p0/z, [x20, #4, MUL VL]\n"
+        "ld1w z13.s, p0/z, [x20, #5, MUL VL]\n"
+        "ld1w z14.s, p0/z, [x20, #6, MUL VL]\n"
+        "ld1w z15.s, p0/z, [x20, #7, MUL VL]\n"
+        "ld1w z4.s, p0/z, [%[s], z12.s, sxtw 2]\n"
+        "ld1w z5.s, p0/z, [%[s], z13.s, sxtw 2]\n"
+        "ld1w z6.s, p0/z, [%[s], z14.s, sxtw 2]\n"
+        "ld1w z7.s, p0/z, [%[s], z15.s, sxtw 2]\n"
+        "st1w z0.s, p0, [%[d], #0, MUL VL]\n"
+        "st1w z1.s, p0, [%[d], #1, MUL VL]\n"
+        "st1w z2.s, p0, [%[d], #2, MUL VL]\n"
+        "st1w z3.s, p0, [%[d], #3, MUL VL]\n"
+        "st1w z4.s, p0, [%[d], #4, MUL VL]\n"
+        "st1w z5.s, p0, [%[d], #5, MUL VL]\n"
+        "st1w z6.s, p0, [%[d], #6, MUL VL]\n"
+        "st1w z7.s, p0, [%[d], #7, MUL VL]\n"
+        "add x20, x20, x19\n"
+        "add %[d], %[d], x19\n"
+        "subs x17, x17, #1\n"
+        "subs x16, x16, #1\n"
+        "b.ne 1b\n"
+        : [d] "+r" (dst)
+        : [s] "r" (src), [idx] "r" (idx_base), [inc] "r" (chunk_bytes),
+          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
+          [idx_reset] "r" (gather_indices)
+        : "x16", "x17", "x18", "x19", "x20", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
+          "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
+    );
 }
 
 static void sve_gather_ld1sw_ld1d(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -91,34 +106,49 @@ static void sve_gather_ld1sw_ld1d(void *a, void *b, void *c, uint64_t size, doub
     uint64_t chunk_bytes = vl_d * 4 * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / (vl_d * 4);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i % idx_pool_iters == 0) idx_base = gather_indices;
-        
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1sw z4.d, p0/z, [%[idx], #0, MUL VL]\n"
-            "ld1sw z5.d, p0/z, [%[idx], #1, MUL VL]\n"
-            "ld1sw z6.d, p0/z, [%[idx], #2, MUL VL]\n"
-            "ld1sw z7.d, p0/z, [%[idx], #3, MUL VL]\n"
-            "ld1d z0.d, p0/z, [%[sd], z4.d, lsl 3]\n"
-            "ld1d z1.d, p0/z, [%[sd], z5.d, lsl 3]\n"
-            "ld1d z2.d, p0/z, [%[sd], z6.d, lsl 3]\n"
-            "ld1d z3.d, p0/z, [%[sd], z7.d, lsl 3]\n"
-            "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-            "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
-            "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
-            "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
-            "add %[idx], %[idx], %[inc]\n"
-            "add %[d], %[d], %[incd]\n"
-            : [idx] "+r" (idx_base), [d] "+r" (dst)
-            : [sd] "r" (src_d), 
-              [inc] "r" (vl_d * 4 * sizeof(int32_t)),
-              [incd] "r" (vl_d * 4 * sizeof(double))
-            : "p0",
-              "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
-        );
-    }
+    uint64_t idx_inc = vl_d * 4 * sizeof(int32_t);
+    uint64_t dst_inc = vl_d * 4 * sizeof(double);
+    
+    __asm__ volatile (
+        "mov x16, %[iter]\n"
+        "mov x17, #0\n"
+        "mov x18, %[idx_reset]\n"
+        "mov x19, %[inc]\n"
+        "mov x20, %[incd]\n"
+        "mov x21, %[idx]\n"
+        "1:\n"
+        "cmp x17, #0\n"
+        "b.ne 2f\n"
+        "mov x21, x18\n"
+        "mov x17, %[reset]\n"
+        "2:\n"
+        "ptrue p0.d\n"
+        "ld1sw z4.d, p0/z, [x21, #0, MUL VL]\n"
+        "ld1sw z5.d, p0/z, [x21, #1, MUL VL]\n"
+        "ld1sw z6.d, p0/z, [x21, #2, MUL VL]\n"
+        "ld1sw z7.d, p0/z, [x21, #3, MUL VL]\n"
+        "ld1d z0.d, p0/z, [%[sd], z4.d, lsl 3]\n"
+        "ld1d z1.d, p0/z, [%[sd], z5.d, lsl 3]\n"
+        "ld1d z2.d, p0/z, [%[sd], z6.d, lsl 3]\n"
+        "ld1d z3.d, p0/z, [%[sd], z7.d, lsl 3]\n"
+        "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
+        "st1d z1.d, p0, [%[d], #1, MUL VL]\n"
+        "st1d z2.d, p0, [%[d], #2, MUL VL]\n"
+        "st1d z3.d, p0, [%[d], #3, MUL VL]\n"
+        "add x21, x21, x19\n"
+        "add %[d], %[d], x20\n"
+        "subs x17, x17, #1\n"
+        "subs x16, x16, #1\n"
+        "b.ne 1b\n"
+        : [d] "+r" (dst)
+        : [sd] "r" (src_d), [idx] "r" (idx_base), [inc] "r" (idx_inc), [incd] "r" (dst_inc),
+          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
+          [idx_reset] "r" (gather_indices)
+        : "x16", "x17", "x18", "x19", "x20", "x21", "p0",
+          "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7", "memory"
+    );
 }
 
 //=== SVE_SCATTER_TESTS
@@ -131,44 +161,57 @@ static void sve_scatter_st1w(void *a, void *b, void *c, uint64_t size, double sc
     uint64_t chunk_bytes = vl * 8 * sizeof(float);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / (vl * 8);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i % idx_pool_iters == 0) idx_base = gather_indices;
-        
-        __asm__ volatile (
-            "ptrue p0.s\n"
-            "ld1w z0.s, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1w z1.s, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1w z2.s, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1w z3.s, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1w z8.s, p0/z, [%[idx], #0, MUL VL]\n"
-            "ld1w z9.s, p0/z, [%[idx], #1, MUL VL]\n"
-            "ld1w z10.s, p0/z, [%[idx], #2, MUL VL]\n"
-            "ld1w z11.s, p0/z, [%[idx], #3, MUL VL]\n"
-            "st1w z0.s, p0, [%[d], z8.s, sxtw 2]\n"
-            "st1w z1.s, p0, [%[d], z9.s, sxtw 2]\n"
-            "st1w z2.s, p0, [%[d], z10.s, sxtw 2]\n"
-            "st1w z3.s, p0, [%[d], z11.s, sxtw 2]\n"
-            "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
-            "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
-            "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
-            "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
-            "ld1w z12.s, p0/z, [%[idx], #4, MUL VL]\n"
-            "ld1w z13.s, p0/z, [%[idx], #5, MUL VL]\n"
-            "ld1w z14.s, p0/z, [%[idx], #6, MUL VL]\n"
-            "ld1w z15.s, p0/z, [%[idx], #7, MUL VL]\n"
-            "st1w z4.s, p0, [%[d], z12.s, sxtw 2]\n"
-            "st1w z5.s, p0, [%[d], z13.s, sxtw 2]\n"
-            "st1w z6.s, p0, [%[d], z14.s, sxtw 2]\n"
-            "st1w z7.s, p0, [%[d], z15.s, sxtw 2]\n"
-            "add %[idx], %[idx], %[inc]\n"
-            "add %[s], %[s], %[inc]\n"
-            : [idx] "+r" (idx_base), [s] "+r" (src)
-            : [d] "r" (dst), [inc] "r" (chunk_bytes)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
-              "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
-        );
-    }
+    __asm__ volatile (
+        "mov x16, %[iter]\n"
+        "mov x17, #0\n"
+        "mov x18, %[idx_reset]\n"
+        "mov x19, %[inc]\n"
+        "mov x20, %[idx]\n"
+        "1:\n"
+        "cmp x17, #0\n"
+        "b.ne 2f\n"
+        "mov x20, x18\n"
+        "mov x17, %[reset]\n"
+        "2:\n"
+        "ptrue p0.s\n"
+        "ld1w z0.s, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1w z1.s, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1w z2.s, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1w z3.s, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1w z8.s, p0/z, [x20, #0, MUL VL]\n"
+        "ld1w z9.s, p0/z, [x20, #1, MUL VL]\n"
+        "ld1w z10.s, p0/z, [x20, #2, MUL VL]\n"
+        "ld1w z11.s, p0/z, [x20, #3, MUL VL]\n"
+        "st1w z0.s, p0, [%[d], z8.s, sxtw 2]\n"
+        "st1w z1.s, p0, [%[d], z9.s, sxtw 2]\n"
+        "st1w z2.s, p0, [%[d], z10.s, sxtw 2]\n"
+        "st1w z3.s, p0, [%[d], z11.s, sxtw 2]\n"
+        "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
+        "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
+        "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
+        "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
+        "ld1w z12.s, p0/z, [x20, #4, MUL VL]\n"
+        "ld1w z13.s, p0/z, [x20, #5, MUL VL]\n"
+        "ld1w z14.s, p0/z, [x20, #6, MUL VL]\n"
+        "ld1w z15.s, p0/z, [x20, #7, MUL VL]\n"
+        "st1w z4.s, p0, [%[d], z12.s, sxtw 2]\n"
+        "st1w z5.s, p0, [%[d], z13.s, sxtw 2]\n"
+        "st1w z6.s, p0, [%[d], z14.s, sxtw 2]\n"
+        "st1w z7.s, p0, [%[d], z15.s, sxtw 2]\n"
+        "add x20, x20, x19\n"
+        "add %[s], %[s], x19\n"
+        "subs x17, x17, #1\n"
+        "subs x16, x16, #1\n"
+        "b.ne 1b\n"
+        : [s] "+r" (src)
+        : [d] "r" (dst), [idx] "r" (idx_base), [inc] "r" (chunk_bytes),
+          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
+          [idx_reset] "r" (gather_indices)
+        : "x16", "x17", "x18", "x19", "x20", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
+          "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
+    );
 }
 
 static void sve_scatter_st1d(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -180,35 +223,49 @@ static void sve_scatter_st1d(void *a, void *b, void *c, uint64_t size, double sc
     uint64_t chunk_bytes = vl_d * 4 * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / (vl_d * 4);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i % idx_pool_iters == 0) idx_base = gather_indices;
-        
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
-            "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
-            "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
-            "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
-            "ld1sw z12.d, p0/z, [%[idx], #0, MUL VL]\n"
-            "ld1sw z13.d, p0/z, [%[idx], #1, MUL VL]\n"
-            "ld1sw z14.d, p0/z, [%[idx], #2, MUL VL]\n"
-            "ld1sw z15.d, p0/z, [%[idx], #3, MUL VL]\n"
-            "st1d z0.d, p0, [%[d], z12.d, lsl 3]\n"
-            "st1d z1.d, p0, [%[d], z13.d, lsl 3]\n"
-            "st1d z2.d, p0, [%[d], z14.d, lsl 3]\n"
-            "st1d z3.d, p0, [%[d], z15.d, lsl 3]\n"
-            "add %[idx], %[idx], %[inc]\n"
-            "add %[s], %[s], %[incd]\n"
-            : [idx] "+r" (idx_base), [s] "+r" (src)
-            : [d] "r" (dst), 
-              [inc] "r" (vl_d * 4 * sizeof(int32_t)),
-              [incd] "r" (vl_d * 4 * sizeof(double))
-            : "p0",
-              "z0", "z1", "z2", "z3",
-              "z12", "z13", "z14", "z15", "memory"
-        );
-    }
+    uint64_t idx_inc = vl_d * 4 * sizeof(int32_t);
+    uint64_t src_inc = vl_d * 4 * sizeof(double);
+    
+    __asm__ volatile (
+        "mov x16, %[iter]\n"
+        "mov x17, #0\n"
+        "mov x18, %[idx_reset]\n"
+        "mov x19, %[inc]\n"
+        "mov x20, %[incd]\n"
+        "mov x21, %[idx]\n"
+        "1:\n"
+        "cmp x17, #0\n"
+        "b.ne 2f\n"
+        "mov x21, x18\n"
+        "mov x17, %[reset]\n"
+        "2:\n"
+        "ptrue p0.d\n"
+        "ld1d z0.d, p0/z, [%[s], #0, MUL VL]\n"
+        "ld1d z1.d, p0/z, [%[s], #1, MUL VL]\n"
+        "ld1d z2.d, p0/z, [%[s], #2, MUL VL]\n"
+        "ld1d z3.d, p0/z, [%[s], #3, MUL VL]\n"
+        "ld1sw z12.d, p0/z, [x21, #0, MUL VL]\n"
+        "ld1sw z13.d, p0/z, [x21, #1, MUL VL]\n"
+        "ld1sw z14.d, p0/z, [x21, #2, MUL VL]\n"
+        "ld1sw z15.d, p0/z, [x21, #3, MUL VL]\n"
+        "st1d z0.d, p0, [%[d], z12.d, lsl 3]\n"
+        "st1d z1.d, p0, [%[d], z13.d, lsl 3]\n"
+        "st1d z2.d, p0, [%[d], z14.d, lsl 3]\n"
+        "st1d z3.d, p0, [%[d], z15.d, lsl 3]\n"
+        "add x21, x21, x19\n"
+        "add %[s], %[s], x20\n"
+        "subs x17, x17, #1\n"
+        "subs x16, x16, #1\n"
+        "b.ne 1b\n"
+        : [s] "+r" (src)
+        : [d] "r" (dst), [idx] "r" (idx_base), [inc] "r" (idx_inc), [incd] "r" (src_inc),
+          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
+          [idx_reset] "r" (gather_indices)
+        : "x16", "x17", "x18", "x19", "x20", "x21", "p0",
+          "z0", "z1", "z2", "z3", "z12", "z13", "z14", "z15", "memory"
+    );
 }
 
 //=== SVE_GATHER_SCATTER_TESTS
@@ -220,59 +277,58 @@ static void sve_gather_scatter_w(void *a, void *b, void *c, uint64_t size, doubl
     uint64_t vl = svcntb() / sizeof(int32_t);
     uint64_t chunk_bytes = vl * 8 * sizeof(float);
     uint64_t iterations = buffer_size / chunk_bytes;
-    uint64_t idx_pool_iters = index_pool_size / (vl * 16);
+    uint64_t idx_pool_iters = index_pool_size / (vl * 8);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    int32_t *src_idx = idx_base;
-    int32_t *dst_idx = idx_base + index_pool_size / 2;
-    
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i % idx_pool_iters == 0) {
-            src_idx = idx_base;
-            dst_idx = idx_base + index_pool_size / 2;
-        }
-        
-        __asm__ volatile (
-            "ptrue p0.s\n"
-            "ld1w z8.s, p0/z, [%[si], #0, MUL VL]\n"
-            "ld1w z9.s, p0/z, [%[si], #1, MUL VL]\n"
-            "ld1w z10.s, p0/z, [%[si], #2, MUL VL]\n"
-            "ld1w z11.s, p0/z, [%[si], #3, MUL VL]\n"
-            "ld1w z0.s, p0/z, [%[s], z8.s, sxtw 2]\n"
-            "ld1w z1.s, p0/z, [%[s], z9.s, sxtw 2]\n"
-            "ld1w z2.s, p0/z, [%[s], z10.s, sxtw 2]\n"
-            "ld1w z3.s, p0/z, [%[s], z11.s, sxtw 2]\n"
-            "ld1w z12.s, p0/z, [%[di], #0, MUL VL]\n"
-            "ld1w z13.s, p0/z, [%[di], #1, MUL VL]\n"
-            "ld1w z14.s, p0/z, [%[di], #2, MUL VL]\n"
-            "ld1w z15.s, p0/z, [%[di], #3, MUL VL]\n"
-            "st1w z0.s, p0, [%[d], z12.s, sxtw 2]\n"
-            "st1w z1.s, p0, [%[d], z13.s, sxtw 2]\n"
-            "st1w z2.s, p0, [%[d], z14.s, sxtw 2]\n"
-            "st1w z3.s, p0, [%[d], z15.s, sxtw 2]\n"
-            "ld1w z4.s, p0/z, [%[si], #4, MUL VL]\n"
-            "ld1w z5.s, p0/z, [%[si], #5, MUL VL]\n"
-            "ld1w z6.s, p0/z, [%[si], #6, MUL VL]\n"
-            "ld1w z7.s, p0/z, [%[si], #7, MUL VL]\n"
-            "ld1w z0.s, p0/z, [%[s], z4.s, sxtw 2]\n"
-            "ld1w z1.s, p0/z, [%[s], z5.s, sxtw 2]\n"
-            "ld1w z2.s, p0/z, [%[s], z6.s, sxtw 2]\n"
-            "ld1w z3.s, p0/z, [%[s], z7.s, sxtw 2]\n"
-            "ld1w z12.s, p0/z, [%[di], #4, MUL VL]\n"
-            "ld1w z13.s, p0/z, [%[di], #5, MUL VL]\n"
-            "ld1w z14.s, p0/z, [%[di], #6, MUL VL]\n"
-            "ld1w z15.s, p0/z, [%[di], #7, MUL VL]\n"
-            "st1w z0.s, p0, [%[d], z12.s, sxtw 2]\n"
-            "st1w z1.s, p0, [%[d], z13.s, sxtw 2]\n"
-            "st1w z2.s, p0, [%[d], z14.s, sxtw 2]\n"
-            "st1w z3.s, p0, [%[d], z15.s, sxtw 2]\n"
-            "add %[si], %[si], %[inc]\n"
-            "add %[di], %[di], %[inc]\n"
-            : [si] "+r" (src_idx), [di] "+r" (dst_idx)
-            : [s] "r" (src), [d] "r" (dst), [inc] "r" (chunk_bytes)
-            : "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
-              "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
-        );
-    }
+    __asm__ volatile (
+        "mov x16, %[iter]\n"
+        "mov x17, #0\n"
+        "mov x18, %[idx_reset]\n"
+        "mov x19, %[inc]\n"
+        "mov x20, %[idx]\n"
+        "1:\n"
+        "cmp x17, #0\n"
+        "b.ne 2f\n"
+        "mov x20, x18\n"
+        "mov x17, %[reset]\n"
+        "2:\n"
+        "ptrue p0.s\n"
+        "ld1w z8.s, p0/z, [x20, #0, MUL VL]\n"
+        "ld1w z9.s, p0/z, [x20, #1, MUL VL]\n"
+        "ld1w z10.s, p0/z, [x20, #2, MUL VL]\n"
+        "ld1w z11.s, p0/z, [x20, #3, MUL VL]\n"
+        "ld1w z0.s, p0/z, [%[s], z8.s, sxtw 2]\n"
+        "ld1w z1.s, p0/z, [%[s], z9.s, sxtw 2]\n"
+        "ld1w z2.s, p0/z, [%[s], z10.s, sxtw 2]\n"
+        "ld1w z3.s, p0/z, [%[s], z11.s, sxtw 2]\n"
+        "st1w z0.s, p0, [%[d], z8.s, sxtw 2]\n"
+        "st1w z1.s, p0, [%[d], z9.s, sxtw 2]\n"
+        "st1w z2.s, p0, [%[d], z10.s, sxtw 2]\n"
+        "st1w z3.s, p0, [%[d], z11.s, sxtw 2]\n"
+        "ld1w z4.s, p0/z, [x20, #4, MUL VL]\n"
+        "ld1w z5.s, p0/z, [x20, #5, MUL VL]\n"
+        "ld1w z6.s, p0/z, [x20, #6, MUL VL]\n"
+        "ld1w z7.s, p0/z, [x20, #7, MUL VL]\n"
+        "ld1w z0.s, p0/z, [%[s], z4.s, sxtw 2]\n"
+        "ld1w z1.s, p0/z, [%[s], z5.s, sxtw 2]\n"
+        "ld1w z2.s, p0/z, [%[s], z6.s, sxtw 2]\n"
+        "ld1w z3.s, p0/z, [%[s], z7.s, sxtw 2]\n"
+        "st1w z0.s, p0, [%[d], z4.s, sxtw 2]\n"
+        "st1w z1.s, p0, [%[d], z5.s, sxtw 2]\n"
+        "st1w z2.s, p0, [%[d], z6.s, sxtw 2]\n"
+        "st1w z3.s, p0, [%[d], z7.s, sxtw 2]\n"
+        "add x20, x20, x19\n"
+        "subs x17, x17, #1\n"
+        "subs x16, x16, #1\n"
+        "b.ne 1b\n"
+        :
+        : [s] "r" (src), [d] "r" (dst), [idx] "r" (idx_base), [inc] "r" (chunk_bytes),
+          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
+          [idx_reset] "r" (gather_indices)
+        : "x16", "x17", "x18", "x19", "x20", "p0",
+          "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
+          "z8", "z9", "z10", "z11", "memory"
+    );
 }
 
 static void sve_gather_scatter_d(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -283,45 +339,47 @@ static void sve_gather_scatter_d(void *a, void *b, void *c, uint64_t size, doubl
     uint64_t vl_d = vl_bytes / sizeof(int64_t);
     uint64_t chunk_bytes = vl_d * 4 * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
-    uint64_t idx_pool_iters = index_pool_size / (vl_d * 8);
+    uint64_t idx_pool_iters = index_pool_size / (vl_d * 4);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    int32_t *src_idx = idx_base;
-    int32_t *dst_idx = idx_base + index_pool_size / 2;
+    uint64_t idx_inc = vl_d * 4 * sizeof(int32_t);
     
-    for (uint64_t i = 0; i < iterations; i++) {
-        if (i % idx_pool_iters == 0) {
-            src_idx = idx_base;
-            dst_idx = idx_base + index_pool_size / 2;
-        }
-        
-        __asm__ volatile (
-            "ptrue p0.d\n"
-            "ld1sw z4.d, p0/z, [%[si], #0, MUL VL]\n"
-            "ld1sw z5.d, p0/z, [%[si], #1, MUL VL]\n"
-            "ld1sw z6.d, p0/z, [%[si], #2, MUL VL]\n"
-            "ld1sw z7.d, p0/z, [%[si], #3, MUL VL]\n"
-            "ld1d z8.d, p0/z, [%[s], z4.d, lsl 3]\n"
-            "ld1d z9.d, p0/z, [%[s], z5.d, lsl 3]\n"
-            "ld1d z10.d, p0/z, [%[s], z6.d, lsl 3]\n"
-            "ld1d z11.d, p0/z, [%[s], z7.d, lsl 3]\n"
-            "ld1sw z0.d, p0/z, [%[di], #0, MUL VL]\n"
-            "ld1sw z1.d, p0/z, [%[di], #1, MUL VL]\n"
-            "ld1sw z2.d, p0/z, [%[di], #2, MUL VL]\n"
-            "ld1sw z3.d, p0/z, [%[di], #3, MUL VL]\n"
-            "st1d z8.d, p0, [%[d], z0.d, lsl 3]\n"
-            "st1d z9.d, p0, [%[d], z1.d, lsl 3]\n"
-            "st1d z10.d, p0, [%[d], z2.d, lsl 3]\n"
-            "st1d z11.d, p0, [%[d], z3.d, lsl 3]\n"
-            "add %[si], %[si], %[inc]\n"
-            "add %[di], %[di], %[inc]\n"
-            : [si] "+r" (src_idx), [di] "+r" (dst_idx)
-            : [s] "r" (src), [d] "r" (dst), 
-              [inc] "r" (vl_d * 4 * sizeof(int32_t))
-            : "p0",
-              "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
-              "z8", "z9", "z10", "z11", "memory"
-        );
-    }
+    __asm__ volatile (
+        "mov x16, %[iter]\n"
+        "mov x17, #0\n"
+        "mov x18, %[idx_reset]\n"
+        "mov x19, %[inc]\n"
+        "mov x20, %[idx]\n"
+        "1:\n"
+        "cmp x17, #0\n"
+        "b.ne 2f\n"
+        "mov x20, x18\n"
+        "mov x17, %[reset]\n"
+        "2:\n"
+        "ptrue p0.d\n"
+        "ld1sw z4.d, p0/z, [x20, #0, MUL VL]\n"
+        "ld1sw z5.d, p0/z, [x20, #1, MUL VL]\n"
+        "ld1sw z6.d, p0/z, [x20, #2, MUL VL]\n"
+        "ld1sw z7.d, p0/z, [x20, #3, MUL VL]\n"
+        "ld1d z8.d, p0/z, [%[s], z4.d, lsl 3]\n"
+        "ld1d z9.d, p0/z, [%[s], z5.d, lsl 3]\n"
+        "ld1d z10.d, p0/z, [%[s], z6.d, lsl 3]\n"
+        "ld1d z11.d, p0/z, [%[s], z7.d, lsl 3]\n"
+        "st1d z8.d, p0, [%[d], z4.d, lsl 3]\n"
+        "st1d z9.d, p0, [%[d], z5.d, lsl 3]\n"
+        "st1d z10.d, p0, [%[d], z6.d, lsl 3]\n"
+        "st1d z11.d, p0, [%[d], z7.d, lsl 3]\n"
+        "add x20, x20, x19\n"
+        "subs x17, x17, #1\n"
+        "subs x16, x16, #1\n"
+        "b.ne 1b\n"
+        :
+        : [s] "r" (src), [d] "r" (dst), [idx] "r" (idx_base), [inc] "r" (idx_inc),
+          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
+          [idx_reset] "r" (gather_indices)
+        : "x16", "x17", "x18", "x19", "x20", "p0",
+          "z4", "z5", "z6", "z7", "z8", "z9", "z10", "z11", "memory"
+    );
 }
 
 //=== End
@@ -500,26 +558,21 @@ static int verify_gather_scatter_w(void *a, void *b, void *c) {
     float *expected_val = (float *)malloc(dst_size * sizeof(float));
     memset(write_count, 0, dst_size * sizeof(uint64_t));
     
-    int32_t *src_idx_base = indices;
-    int32_t *dst_idx_base = indices + index_pool_size / 2;
+    uint64_t idx_pool_iters = index_pool_size / (vl * 8);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
     for (uint64_t i = 0; i < total_elements; i++) {
         uint64_t iter = i / (vl * 8);
         uint64_t pos_in_iter = i % (vl * 8);
-        uint64_t idx_pool_iters = index_pool_size / (vl * 16);
-        uint64_t src_idx_pos = (iter % idx_pool_iters) * (vl * 8) + pos_in_iter;
-        uint64_t dst_idx_pos = (iter % idx_pool_iters) * (vl * 8) + pos_in_iter;
+        uint64_t idx_pos = (iter % idx_pool_iters) * (vl * 8) + pos_in_iter;
         
-        if (src_idx_pos >= index_pool_size / 2) continue;
-        if (dst_idx_pos >= index_pool_size / 2) continue;
+        if (idx_pos >= index_pool_size) continue;
         
-        int32_t src_elem_idx = src_idx_base[src_idx_pos];
-        int32_t dst_elem_idx = dst_idx_base[dst_idx_pos];
+        int32_t elem_idx = indices[idx_pos];
         
-        if (src_elem_idx >= 0 && src_elem_idx < src_size &&
-            dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
-            write_count[dst_elem_idx]++;
-            expected_val[dst_elem_idx] = src[src_elem_idx];
+        if (elem_idx >= 0 && elem_idx < src_size && elem_idx < dst_size) {
+            write_count[elem_idx]++;
+            expected_val[elem_idx] = src[elem_idx];
         }
     }
     
@@ -557,26 +610,21 @@ static int verify_gather_scatter_d(void *a, void *b, void *c) {
     double *expected_val = (double *)malloc(dst_size * sizeof(double));
     memset(write_count, 0, dst_size * sizeof(uint64_t));
     
-    int32_t *src_idx_base = indices;
-    int32_t *dst_idx_base = indices + index_pool_size / 2;
+    uint64_t idx_pool_iters = index_pool_size / (vl_d * 4);
+    if (idx_pool_iters < 1) idx_pool_iters = 1;
     
     for (uint64_t i = 0; i < total_elements; i++) {
         uint64_t iter = i / (vl_d * 4);
         uint64_t pos_in_iter = i % (vl_d * 4);
-        uint64_t idx_pool_iters = index_pool_size / (vl_d * 8);
-        uint64_t src_idx_pos = (iter % idx_pool_iters) * (vl_d * 4) + pos_in_iter;
-        uint64_t dst_idx_pos = (iter % idx_pool_iters) * (vl_d * 4) + pos_in_iter;
+        uint64_t idx_pos = (iter % idx_pool_iters) * (vl_d * 4) + pos_in_iter;
         
-        if (src_idx_pos >= index_pool_size / 2) continue;
-        if (dst_idx_pos >= index_pool_size / 2) continue;
+        if (idx_pos >= index_pool_size) continue;
         
-        int32_t src_elem_idx = src_idx_base[src_idx_pos];
-        int32_t dst_elem_idx = dst_idx_base[dst_idx_pos];
+        int32_t elem_idx = indices[idx_pos];
         
-        if (src_elem_idx >= 0 && src_elem_idx < src_size &&
-            dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
-            write_count[dst_elem_idx]++;
-            expected_val[dst_elem_idx] = src[src_elem_idx];
+        if (elem_idx >= 0 && elem_idx < src_size && elem_idx < dst_size) {
+            write_count[elem_idx]++;
+            expected_val[elem_idx] = src[elem_idx];
         }
     }
     
@@ -621,7 +669,9 @@ static void print_usage(const char *prog_name) {
     printf("  -h, --help              Show this help message\n");
     printf("  -l, --list              List all available tests\n");
     printf("  -b, --buffer-size <MB>  Buffer size in MB (default: 128)\n");
-    printf("  -i, --index-size <K>    Index pool size in K elements (default: 1024)\n");
+    printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 0.01)\n");
+    printf("  -m, --index-mode <N>    Index generation mode (default: 0)\n");
+    printf("                           0: Random, 1: Uniform, 2: Hotspot\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("\nTest Specification:\n");
@@ -631,9 +681,10 @@ static void print_usage(const char *prog_name) {
     printf("\nCategories: Gather, Scatter, GatherScatter\n");
     printf("\nExamples:\n");
     printf("  %s                               Run all tests (default)\n", prog_name);
-    printf("  %s -b 64 -i 512                  Use 64MB buffer, 512K indices\n", prog_name);
+    printf("  %s -b 64 -s 0.02                 64MB buffer, 2%% sparsity\n", prog_name);
+    printf("  %s -s 1.0 -m 1                   Full range, uniform indices\n", prog_name);
+    printf("  %s -s 0.5 -m 2                    50%% sparsity, hotspot pattern\n", prog_name);
     printf("  %s Gather                        Run all Gather tests\n", prog_name);
-    printf("  %s -b 256 Scatter                 256MB buffer, run Scatter tests\n", prog_name);
     printf("  %s 0 2                           Run tests 0 and 2\n", prog_name);
 }
 
@@ -744,9 +795,19 @@ int main(int argc, char *argv[]) {
             }
             continue;
         }
-        if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--index-size") == 0) {
+        if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--sparsity") == 0) {
             if (i + 1 < argc) {
-                index_pool_size = (uint64_t)atoi(argv[++i]) * 1024;
+                sparsity = atof(argv[++i]);
+                if (sparsity <= 0.0) sparsity = 0.01;
+                if (sparsity > 1.0) sparsity = 1.0;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--index-mode") == 0) {
+            if (i + 1 < argc) {
+                index_mode = atoi(argv[++i]);
+                if (index_mode < 0) index_mode = 0;
+                if (index_mode > 2) index_mode = 2;
             }
             continue;
         }
@@ -772,10 +833,19 @@ int main(int argc, char *argv[]) {
     
 #ifdef USE_MPI
     MPI_Bcast(&buffer_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&index_pool_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&sparsity, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&index_mode, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
+    
+    index_pool_size = (uint64_t)(sparsity * (buffer_size / sizeof(int64_t)));
+    uint64_t vl_test = svcntb() / sizeof(int64_t);
+    uint64_t vl_test_32 = svcntb() / sizeof(int32_t);
+    uint64_t min_indices_64 = vl_test * 16 * 2;
+    uint64_t min_indices_32 = vl_test_32 * 16 * 2;
+    uint64_t min_indices = (min_indices_64 > min_indices_32) ? min_indices_64 : min_indices_32;
+    if (index_pool_size < min_indices) index_pool_size = min_indices;
     
     uint64_t vl = svcntb();
     
@@ -789,6 +859,7 @@ int main(int argc, char *argv[]) {
         printf("============================================================\n");
         printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
         printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
+        printf("Sparsity: %.4f (%.2f%%)\n", sparsity, sparsity * 100);
         printf("Index Pool Size: %lu elements\n", index_pool_size);
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
@@ -816,10 +887,72 @@ int main(int argc, char *argv[]) {
     
     srand(42);
     uint64_t max_element_idx_64 = buffer_size / sizeof(int64_t) - 1;
-    uint64_t stride = max_element_idx_64 / index_pool_size;
-    if (stride < 1) stride = 1;
-    for (uint64_t i = 0; i < index_pool_size; i++) {
-        gather_indices[i] = (int32_t)((i * stride) + (rand() % stride));
+    uint64_t max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
+    
+    uint64_t min_idx = max_idx, max_found = 0;
+    uint64_t *coverage = (uint64_t *)calloc((max_idx / 64) + 2, sizeof(uint64_t));
+    
+    const char *mode_names[] = {"Random", "Uniform", "Hotspot"};
+    
+    if (index_mode == 0) {
+        for (uint64_t i = 0; i < index_pool_size; i++) {
+            uint64_t rand_val = ((uint64_t)rand() << 32) | rand();
+            uint64_t idx = rand_val % (max_idx + 1);
+            gather_indices[i] = (int32_t)idx;
+            
+            if (idx < min_idx) min_idx = idx;
+            if (idx > max_found) max_found = idx;
+            coverage[idx / 64] |= (1ULL << (idx % 64));
+        }
+    } else if (index_mode == 1) {
+        uint64_t stride = (max_idx + 1) / index_pool_size;
+        if (stride == 0) stride = 1;
+        for (uint64_t i = 0; i < index_pool_size; i++) {
+            uint64_t idx = (i * stride) + ((uint64_t)rand() % stride);
+            if (idx > max_idx) idx = max_idx;
+            gather_indices[i] = (int32_t)idx;
+            
+            if (idx < min_idx) min_idx = idx;
+            if (idx > max_found) max_found = idx;
+            coverage[idx / 64] |= (1ULL << (idx % 64));
+        }
+    } else if (index_mode == 2) {
+        uint64_t hotspot_size = (max_idx + 1) / 10;
+        uint64_t hotspot_start = (uint64_t)rand() % (max_idx + 1 - hotspot_size);
+        uint64_t hotspot_end = hotspot_start + hotspot_size;
+        uint64_t hotspot_prob = 80;
+        
+        for (uint64_t i = 0; i < index_pool_size; i++) {
+            uint64_t idx;
+            if (((uint64_t)rand() % 100) < hotspot_prob) {
+                idx = hotspot_start + ((uint64_t)rand() % hotspot_size);
+            } else {
+                uint64_t rand_val = ((uint64_t)rand() << 32) | rand();
+                idx = rand_val % (max_idx + 1);
+            }
+            gather_indices[i] = (int32_t)idx;
+            
+            if (idx < min_idx) min_idx = idx;
+            if (idx > max_found) max_found = idx;
+            coverage[idx / 64] |= (1ULL << (idx % 64));
+        }
+    }
+    
+    uint64_t covered = 0;
+    uint64_t coverage_buckets = (max_idx / 64) + 1;
+    for (uint64_t i = 0; i < coverage_buckets; i++) {
+        covered += __builtin_popcountll(coverage[i]);
+    }
+    free(coverage);
+    
+    if (rank == 0) {
+        printf("Index Mode: %s\n", mode_names[index_mode]);
+        printf("Max Index: %lu (buffer elements: %lu)\n", max_idx, max_element_idx_64);
+        printf("Generated Range: [%lu, %lu]\n", min_idx, max_found);
+        printf("Unique Indices: %lu / %lu (%.2f%%)\n", covered, index_pool_size, 
+               (double)covered / index_pool_size * 100.0);
+        printf("Coverage: %.4f%% of buffer\n\n", 
+               (double)covered / (max_idx + 1) * 100.0);
     }
     
     double *da = (double *)a;
