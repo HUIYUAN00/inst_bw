@@ -811,3 +811,139 @@ a non-zero exit code. Per user-direction, the job has been aborted.
 - 命令行参数: --help, --list, 索引选择, 类别选择, 名称匹配均正常工作
 - Gather/Scatter 测试: 结果验证通过，无 VERIFY_FAIL 输出
 
+
+---
+
+## gather_scatter_test 测试结果 (新增)
+
+测试时间: 2026-04-27
+
+### 单进程测试
+
+**命令**: `./gather_scatter_test -s 1.0 -m 1 -b 16`
+
+```
+============================================================
+SVE Gather/Scatter Bandwidth Benchmark
+============================================================
+SVE Vector Length: 32 bytes (256 bits)
+Buffer Size: 16 MB per array
+Sparsity: 1.0000 (100.00%)
+Index Pool Size: 2097152 elements
+Warmup Iterations: 5
+Test Iterations: 10
+Registered Tests: 6
+
+Index Mode: Uniform
+Max Index: 2097151 (buffer elements: 2097151)
+Generated Range: [0, 2097151]
+Unique Indices: 2097152 / 2097152 (100.00%)
+Coverage: 100.0000% of buffer
+
+Test                          Category       GB/s   Time(ms)   Data(MB)
+============================================================
+SVE Gather LD1W                 Gather      22.66      1.481         32
+SVE Gather LD1SW+LD1D           Gather      26.37      1.272         32
+SVE Scatter ST1W               Scatter      19.38      1.731         32
+SVE Scatter ST1D               Scatter      27.20      1.233         32
+SVE Gather+Scatter W     GatherScatter      16.14      2.078         32
+SVE Gather+Scatter D     GatherScatter      22.33      1.503         32
+============================================================
+```
+
+### MPI 多进程测试
+
+**命令**: `mpirun --mca btl ^openib --mca mtl ^ofi -np 4 ./gather_scatter_test_mpi -s 1.0 -m 1 -b 16`
+
+```
+============================================================
+SVE Gather/Scatter Bandwidth Benchmark (MPI - 4 processes)
+============================================================
+SVE Vector Length: 32 bytes (256 bits)
+Buffer Size: 16 MB per array
+Sparsity: 1.0000 (100.00%)
+Index Pool Size: 2097152 elements
+
+Index Mode: Uniform
+Max Index: 2097151 (buffer elements: 2097151)
+Generated Range: [0, 2097151]
+Unique Indices: 2097152 / 2097152 (100.00%)
+Coverage: 100.0000% of buffer
+
+Test                          Category       GB/s   Time(ms)   Data(MB) Total(GB/s)
+============================================================
+SVE Gather LD1W                 Gather      25.78      1.301         32      85.25
+SVE Gather LD1SW+LD1D           Gather      32.55      1.031         32     105.69
+SVE Scatter ST1W               Scatter      19.35      1.734         32      69.50
+SVE Scatter ST1D               Scatter      28.93      1.160         32      93.34
+SVE Gather+Scatter W     GatherScatter      16.16      2.077         32      56.46
+SVE Gather+Scatter D     GatherScatter      22.69      1.479         32      82.58
+============================================================
+```
+
+### MPI 打印所有进程结果
+
+**命令**: `mpirun --mca btl ^openib --mca mtl ^ofi -np 4 ./gather_scatter_test_mpi -s 0.5 -m 1 -b 8 -p`
+
+```
+============================================================
+SVE Gather/Scatter Bandwidth Benchmark (MPI - 4 processes)
+============================================================
+SVE Vector Length: 32 bytes (256 bits)
+Buffer Size: 8 MB per array
+Sparsity: 0.5000 (50.00%)
+Index Pool Size: 524288 elements
+
+Index Mode: Uniform
+Max Index: 1048575 (buffer elements: 1048575)
+Generated Range: [0, 1048574]
+Unique Indices: 524288 / 524288 (100.00%)
+Coverage: 50.0000% of buffer
+
+Test                          Category       GB/s   Time(ms)   Data(MB) Total(GB/s)
+============================================================
+[Rank 0] SVE Gather LD1W                 Gather      21.08      0.796         16
+[Rank 1] SVE Gather LD1W                 Gather      21.15      0.793         16
+[Rank 2] SVE Gather LD1W                 Gather      20.12      0.834         16
+[Rank 3] SVE Gather LD1W                 Gather      19.93      0.842         16
+...
+```
+
+### 热点模式测试
+
+**命令**: `./gather_scatter_test -s 0.5 -m 2 -b 8`
+
+```
+============================================================
+SVE Gather/Scatter Bandwidth Benchmark
+============================================================
+SVE Vector Length: 32 bytes (256 bits)
+Buffer Size: 8 MB per array
+Sparsity: 0.5000 (50.00%)
+Index Pool Size: 524288 elements
+
+Index Mode: Hotspot
+Max Index: 1048575 (buffer elements: 1048575)
+Generated Range: [3, 1048567]
+Unique Indices: 192809 / 524288 (36.78%)
+Coverage: 18.3877% of buffer
+
+Test                          Category       GB/s   Time(ms)   Data(MB)
+============================================================
+SVE Gather LD1W                 Gather       6.24      2.691         16
+SVE Gather LD1SW+LD1D           Gather       9.78      1.715         16
+SVE Scatter ST1W               Scatter       6.54      2.565         16
+SVE Scatter ST1D               Scatter       7.59      2.212         16
+SVE Gather+Scatter W     GatherScatter       3.30      5.088         16
+SVE Gather+Scatter D     GatherScatter       4.21      3.984         16
+============================================================
+```
+
+### 新功能总结
+
+- **稀疏度参数**: 替代固定索引池大小，支持 0.0001-1.0 范围
+- **索引模式**: Random/Uniform/Hotspot 三种模式
+- **汇编内联循环**: 消除 C 循环开销
+- **相同索引池**: Gather+Scatter 使用相同索引，语义为 dst[idx[i]] = src[idx[i]]
+- **MPI 打印所有进程**: 使用 -p 参数打印所有进程独立结果
+- **覆盖率统计**: 输出索引覆盖 buffer 的比例

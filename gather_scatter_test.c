@@ -15,6 +15,7 @@ static int test_iter = 10;
 static uint64_t buffer_size = 128 * 1024 * 1024;
 static double sparsity = 0.01;
 static int index_mode = 0;
+static int print_all_ranks = 0;
 static uint64_t index_pool_size = 0;
 static int32_t *gather_indices = NULL;
 
@@ -674,6 +675,7 @@ static void print_usage(const char *prog_name) {
     printf("                           0: Random, 1: Uniform, 2: Hotspot\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
+    printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
     printf("\nTest Specification:\n");
     printf("  <index>                 Run test by index (0-based)\n");
     printf("  <name>                  Run test by name (partial match)\n");
@@ -823,6 +825,10 @@ int main(int argc, char *argv[]) {
             }
             continue;
         }
+        if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--print-all") == 0) {
+            print_all_ranks = 1;
+            continue;
+        }
         run_all = 0;
         num_specs++;
     }
@@ -835,6 +841,7 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&buffer_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
     MPI_Bcast(&sparsity, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Bcast(&index_mode, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
@@ -1008,11 +1015,21 @@ int main(int argc, char *argv[]) {
             verify_result = verify_gather_scatter_d(a, b, c);
         }
         
-        if (rank == 0) {
 #ifdef USE_MPI
-            printf("%-22s %15s %10.2f %10.3f %10.0f %10.2f",
-                   test->name, test->category, bandwidth, time_sec * 1000,
-                   (double)bytes_per_iter / (1024 * 1024), total_bw);
+        MPI_Barrier(MPI_COMM_WORLD);
+#endif
+        
+        if (rank == 0 || print_all_ranks) {
+#ifdef USE_MPI
+            if (print_all_ranks) {
+                printf("[Rank %d] %-22s %15s %10.2f %10.3f %10.0f",
+                       rank, test->name, test->category, bandwidth, time_sec * 1000,
+                       (double)bytes_per_iter / (1024 * 1024));
+            } else {
+                printf("%-22s %15s %10.2f %10.3f %10.0f %10.2f",
+                       test->name, test->category, bandwidth, time_sec * 1000,
+                       (double)bytes_per_iter / (1024 * 1024), total_bw);
+            }
 #else
             printf("%-22s %15s %10.2f %10.3f %10.0f",
                    test->name, test->category, bandwidth, time_sec * 1000,
@@ -1024,6 +1041,10 @@ int main(int argc, char *argv[]) {
             printf("\n");
         }
     }
+    
+#ifdef USE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
     
     if (rank == 0) {
         printf("============================================================\n");
