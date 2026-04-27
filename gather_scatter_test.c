@@ -914,8 +914,11 @@ int main(int argc, char *argv[]) {
     } else if (index_mode == 1) {
         uint64_t stride = (max_idx + 1) / index_pool_size;
         if (stride == 0) stride = 1;
+        uint64_t remainder = (max_idx + 1) - stride * index_pool_size;
         for (uint64_t i = 0; i < index_pool_size; i++) {
-            uint64_t idx = (i * stride) + ((uint64_t)rand() % stride);
+            uint64_t base = i * stride + (i < remainder ? i : remainder);
+            uint64_t offset = ((uint64_t)rand() << 32 | rand()) % stride;
+            uint64_t idx = base + offset;
             if (idx > max_idx) idx = max_idx;
             gather_indices[i] = (int32_t)idx;
             
