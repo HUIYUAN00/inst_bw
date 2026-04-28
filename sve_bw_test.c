@@ -646,8 +646,8 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
     
-    buffer_size = (buffer_size / 2048) * 2048;
-    if (buffer_size < 2048) buffer_size = 2048;
+    buffer_size = (buffer_size / 1024) * 1024;
+    if (buffer_size < 1024) buffer_size = 1024;
     
     uint64_t vl = svcntb();
     

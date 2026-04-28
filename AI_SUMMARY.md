@@ -151,13 +151,13 @@ ld1sw z4.d, p0/z, [idx, #0, MUL VL]
 
 #### 批量处理
 
-每轮循环处理8个向量（VL长度）的数据：
-- **float测试**: 8 VL * 32-bit = 8 VL个元素
+每轮循环处理4个向量（VL长度）的数据：
+- **float测试**: 4 VL * 32-bit = 4 VL个元素
 - **double测试**: 4 VL * 64-bit = 4 VL个元素
 
 **索引重置机制**:
 ```c
-idx_pool_iters = index_pool_size / (vl * 8);  // 每多少轮重置
+idx_pool_iters = index_pool_size / (vl * 4);  // 每多少轮重置
 x17计数器：每轮递减，到0时重置索引指针
 ```
 
@@ -441,12 +441,11 @@ max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
 #### buffer_size对齐
 
 ```c
-// SVE256专用: VL=256 bytes, chunk=VL*8=2048 bytes
-buffer_size = (buffer_size / 2048) * 2048;
-if (buffer_size < 2048) buffer_size = 2048;
-```
+// SVE256专用: VL=256 bytes, chunk=VL*4=1024 bytes
+buffer_size = (buffer_size / 1024) * 1024;
+if (buffer_size < 1024) buffer_size = 1024;
 
-确保buffer_size对齐到2048字节边界，避免SVE汇编循环截断。
+确保buffer_size对齐到1024字节边界，避免SVE汇编循环截断。
 
 ### 相关文件
 

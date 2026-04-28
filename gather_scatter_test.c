@@ -42,9 +42,9 @@ static void sve_gather_ld1w_ld1w(void *a, void *b, void *c, uint64_t size, doubl
     float *dst = (float *)a;
     int32_t *idx_base = gather_indices;
     uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t chunk_bytes = vl * 8 * sizeof(int32_t);
+    uint64_t chunk_bytes = vl * 4 * sizeof(int32_t);
     uint64_t iterations = buffer_size / chunk_bytes;
-    uint64_t idx_pool_iters = index_pool_size / (vl * 8);
+    uint64_t idx_pool_iters = index_pool_size / (vl * 4);
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
     __asm__ volatile (
@@ -68,22 +68,10 @@ static void sve_gather_ld1w_ld1w(void *a, void *b, void *c, uint64_t size, doubl
         "ld1w z1.s, p0/z, [%[s], z9.s, sxtw 2]\n"
         "ld1w z2.s, p0/z, [%[s], z10.s, sxtw 2]\n"
         "ld1w z3.s, p0/z, [%[s], z11.s, sxtw 2]\n"
-        "ld1w z12.s, p0/z, [x20, #4, MUL VL]\n"
-        "ld1w z13.s, p0/z, [x20, #5, MUL VL]\n"
-        "ld1w z14.s, p0/z, [x20, #6, MUL VL]\n"
-        "ld1w z15.s, p0/z, [x20, #7, MUL VL]\n"
-        "ld1w z4.s, p0/z, [%[s], z12.s, sxtw 2]\n"
-        "ld1w z5.s, p0/z, [%[s], z13.s, sxtw 2]\n"
-        "ld1w z6.s, p0/z, [%[s], z14.s, sxtw 2]\n"
-        "ld1w z7.s, p0/z, [%[s], z15.s, sxtw 2]\n"
         "st1w z0.s, p0, [%[d], #0, MUL VL]\n"
         "st1w z1.s, p0, [%[d], #1, MUL VL]\n"
         "st1w z2.s, p0, [%[d], #2, MUL VL]\n"
         "st1w z3.s, p0, [%[d], #3, MUL VL]\n"
-        "st1w z4.s, p0, [%[d], #4, MUL VL]\n"
-        "st1w z5.s, p0, [%[d], #5, MUL VL]\n"
-        "st1w z6.s, p0, [%[d], #6, MUL VL]\n"
-        "st1w z7.s, p0, [%[d], #7, MUL VL]\n"
         "add x20, x20, x19\n"
         "add %[d], %[d], x19\n"
         "subs x17, x17, #1\n"
@@ -93,8 +81,8 @@ static void sve_gather_ld1w_ld1w(void *a, void *b, void *c, uint64_t size, doubl
         : [s] "r" (src), [idx] "r" (idx_base), [inc] "r" (chunk_bytes),
           [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
           [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x20", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
-          "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
+        : "x16", "x17", "x18", "x19", "x20", "p0",
+          "z0", "z1", "z2", "z3", "z8", "z9", "z10", "z11", "memory"
     );
 }
 
@@ -159,9 +147,9 @@ static void sve_scatter_st1w(void *a, void *b, void *c, uint64_t size, double sc
     float *dst = (float *)b;
     int32_t *idx_base = gather_indices;
     uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t chunk_bytes = vl * 8 * sizeof(float);
+    uint64_t chunk_bytes = vl * 4 * sizeof(float);
     uint64_t iterations = buffer_size / chunk_bytes;
-    uint64_t idx_pool_iters = index_pool_size / (vl * 8);
+    uint64_t idx_pool_iters = index_pool_size / (vl * 4);
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
     __asm__ volatile (
@@ -189,18 +177,6 @@ static void sve_scatter_st1w(void *a, void *b, void *c, uint64_t size, double sc
         "st1w z1.s, p0, [%[d], z9.s, sxtw 2]\n"
         "st1w z2.s, p0, [%[d], z10.s, sxtw 2]\n"
         "st1w z3.s, p0, [%[d], z11.s, sxtw 2]\n"
-        "ld1w z4.s, p0/z, [%[s], #4, MUL VL]\n"
-        "ld1w z5.s, p0/z, [%[s], #5, MUL VL]\n"
-        "ld1w z6.s, p0/z, [%[s], #6, MUL VL]\n"
-        "ld1w z7.s, p0/z, [%[s], #7, MUL VL]\n"
-        "ld1w z12.s, p0/z, [x20, #4, MUL VL]\n"
-        "ld1w z13.s, p0/z, [x20, #5, MUL VL]\n"
-        "ld1w z14.s, p0/z, [x20, #6, MUL VL]\n"
-        "ld1w z15.s, p0/z, [x20, #7, MUL VL]\n"
-        "st1w z4.s, p0, [%[d], z12.s, sxtw 2]\n"
-        "st1w z5.s, p0, [%[d], z13.s, sxtw 2]\n"
-        "st1w z6.s, p0, [%[d], z14.s, sxtw 2]\n"
-        "st1w z7.s, p0, [%[d], z15.s, sxtw 2]\n"
         "add x20, x20, x19\n"
         "add %[s], %[s], x19\n"
         "subs x17, x17, #1\n"
@@ -210,8 +186,8 @@ static void sve_scatter_st1w(void *a, void *b, void *c, uint64_t size, double sc
         : [d] "r" (dst), [idx] "r" (idx_base), [inc] "r" (chunk_bytes),
           [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
           [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x20", "p0", "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
-          "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15", "memory"
+        : "x16", "x17", "x18", "x19", "x20", "p0",
+          "z0", "z1", "z2", "z3", "z8", "z9", "z10", "z11", "memory"
     );
 }
 
@@ -276,9 +252,9 @@ static void sve_gather_scatter_w(void *a, void *b, void *c, uint64_t size, doubl
     float *dst = (float *)a;
     int32_t *idx_base = gather_indices;
     uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t chunk_bytes = vl * 8 * sizeof(float);
+    uint64_t chunk_bytes = vl * 4 * sizeof(float);
     uint64_t iterations = buffer_size / chunk_bytes;
-    uint64_t idx_pool_iters = index_pool_size / (vl * 8);
+    uint64_t idx_pool_iters = index_pool_size / (vl * 4);
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
     __asm__ volatile (
@@ -306,18 +282,6 @@ static void sve_gather_scatter_w(void *a, void *b, void *c, uint64_t size, doubl
         "st1w z1.s, p0, [%[d], z9.s, sxtw 2]\n"
         "st1w z2.s, p0, [%[d], z10.s, sxtw 2]\n"
         "st1w z3.s, p0, [%[d], z11.s, sxtw 2]\n"
-        "ld1w z4.s, p0/z, [x20, #4, MUL VL]\n"
-        "ld1w z5.s, p0/z, [x20, #5, MUL VL]\n"
-        "ld1w z6.s, p0/z, [x20, #6, MUL VL]\n"
-        "ld1w z7.s, p0/z, [x20, #7, MUL VL]\n"
-        "ld1w z0.s, p0/z, [%[s], z4.s, sxtw 2]\n"
-        "ld1w z1.s, p0/z, [%[s], z5.s, sxtw 2]\n"
-        "ld1w z2.s, p0/z, [%[s], z6.s, sxtw 2]\n"
-        "ld1w z3.s, p0/z, [%[s], z7.s, sxtw 2]\n"
-        "st1w z0.s, p0, [%[d], z4.s, sxtw 2]\n"
-        "st1w z1.s, p0, [%[d], z5.s, sxtw 2]\n"
-        "st1w z2.s, p0, [%[d], z6.s, sxtw 2]\n"
-        "st1w z3.s, p0, [%[d], z7.s, sxtw 2]\n"
         "add x20, x20, x19\n"
         "subs x17, x17, #1\n"
         "subs x16, x16, #1\n"
@@ -327,8 +291,7 @@ static void sve_gather_scatter_w(void *a, void *b, void *c, uint64_t size, doubl
           [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
           [idx_reset] "r" (gather_indices)
         : "x16", "x17", "x18", "x19", "x20", "p0",
-          "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
-          "z8", "z9", "z10", "z11", "memory"
+          "z0", "z1", "z2", "z3", "z8", "z9", "z10", "z11", "memory"
     );
 }
 
@@ -397,7 +360,7 @@ static int verify_gather(void *dst_ptr, void *src_ptr, int is_double) {
     int32_t *indices = gather_indices;
     int errors = 0;
     uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
-    uint64_t chunk = is_double ? vl * 4 : vl * 8;
+    uint64_t chunk = vl * 4;
     uint64_t pool_iters = index_pool_size / chunk;
     if (pool_iters < 1) pool_iters = 1;
     uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
@@ -432,7 +395,7 @@ static int verify_scatter(void *src_ptr, void *dst_ptr, int is_double) {
     int32_t *indices = gather_indices;
     int errors = 0;
     uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
-    uint64_t chunk = is_double ? vl * 4 : vl * 8;
+    uint64_t chunk = vl * 4;
     uint64_t pool_iters = index_pool_size / chunk;
     if (pool_iters < 1) pool_iters = 1;
     uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
@@ -486,7 +449,7 @@ static int verify_gather_scatter(void *dst_ptr, void *src_ptr, int is_double) {
     int32_t *indices = gather_indices;
     int errors = 0;
     uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
-    uint64_t chunk = is_double ? vl * 4 : vl * 8;
+    uint64_t chunk = vl * 4;
     uint64_t pool_iters = index_pool_size / chunk;
     if (pool_iters < 1) pool_iters = 1;
     uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
@@ -733,14 +696,14 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
     
-    buffer_size = (buffer_size / 2048) * 2048;
-    if (buffer_size < 2048) buffer_size = 2048;
+    buffer_size = (buffer_size / 1024) * 1024;
+    if (buffer_size < 1024) buffer_size = 1024;
     
     index_pool_size = (uint64_t)(sparsity * (buffer_size / sizeof(int64_t)));
     uint64_t vl_test = svcntb() / sizeof(int64_t);
     uint64_t vl_test_32 = svcntb() / sizeof(int32_t);
-    uint64_t min_indices_64 = vl_test * 16 * 2;
-    uint64_t min_indices_32 = vl_test_32 * 16 * 2;
+    uint64_t min_indices_64 = vl_test * 4 * 2;
+    uint64_t min_indices_32 = vl_test_32 * 4 * 2;
     uint64_t min_indices = (min_indices_64 > min_indices_32) ? min_indices_64 : min_indices_32;
     if (index_pool_size < min_indices) index_pool_size = min_indices;
     
