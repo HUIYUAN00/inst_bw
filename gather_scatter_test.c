@@ -389,204 +389,89 @@ static void sve_gather_scatter_d(void *a, void *b, void *c, uint64_t size, doubl
 
 //=== VERIFY_FUNCTIONS
 
-static int verify_gather_ld1w_ld1w(void *a, void *b, void *c) {
-    float *src = (float *)b;
-    float *dst = (float *)a;
-    int32_t *indices = gather_indices;
-    int errors = 0;
-    uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t total_elements = buffer_size / sizeof(float);
-    
-    for (uint64_t i = 0; i < total_elements && errors < 5; i++) {
-        uint64_t iter = i / (vl * 8);
-        uint64_t pos_in_iter = i % (vl * 8);
-        uint64_t idx_pos = (iter % (index_pool_size / (vl * 8))) * (vl * 8) + pos_in_iter;
-        
-        if (idx_pos >= index_pool_size) continue;
-        
-        int32_t src_elem_idx = indices[idx_pos];
-        float expected = src[src_elem_idx];
-        float actual = dst[i];
-        
-        if (expected != actual) {
-            if (errors == 0) {
-                fprintf(stderr, "LD1W Gather verify FAILED:\n");
-            }
-            fprintf(stderr, "  dst[%lu]: expected %.1f (src[%d]), got %.1f\n",
-                    i, expected, src_elem_idx, actual);
-            errors++;
-        }
-    }
-    return errors;
+static inline uint64_t calc_idx_pos(uint64_t i, uint64_t chunk, uint64_t pool_iters) {
+    return (i / chunk % pool_iters) * chunk + i % chunk;
 }
 
-static int verify_gather_ld1sw_ld1d(void *a, void *b, void *c) {
-    double *src_d = (double *)c;
-    double *dst = (double *)a;
+static int verify_gather(void *dst_ptr, void *src_ptr, int is_double) {
     int32_t *indices = gather_indices;
     int errors = 0;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
-    uint64_t total_elements = buffer_size / sizeof(double);
+    uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
+    uint64_t chunk = is_double ? vl * 4 : vl * 8;
+    uint64_t pool_iters = index_pool_size / chunk;
+    if (pool_iters < 1) pool_iters = 1;
+    uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
     
-    for (uint64_t i = 0; i < total_elements && errors < 5; i++) {
-        uint64_t iter = i / (vl_d * 4);
-        uint64_t pos_in_iter = i % (vl_d * 4);
-        uint64_t idx_pos = (iter % (index_pool_size / (vl_d * 4))) * (vl_d * 4) + pos_in_iter;
-        
+    for (uint64_t i = 0; i < total && errors < 5; i++) {
+        uint64_t idx_pos = calc_idx_pos(i, chunk, pool_iters);
         if (idx_pos >= index_pool_size) continue;
-        
-        int32_t src_elem_idx = indices[idx_pos];
-        double expected = src_d[src_elem_idx];
-        double actual = dst[i];
-        
-        if (expected != actual) {
-            if (errors == 0) {
-                fprintf(stderr, "LD1SW+LD1D Gather verify FAILED:\n");
-            }
-            fprintf(stderr, "  dst[%lu]: expected %.1f (src_d[%d]), got %.1f\n",
-                    i, expected, src_elem_idx, actual);
-            errors++;
-        }
-    }
-    return errors;
-}
-
-static int verify_scatter_st1w(void *a, void *b, void *c) {
-    float *src = (float *)a;
-    float *dst = (float *)b;
-    int32_t *indices = gather_indices;
-    int errors = 0;
-    uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t total_elements = buffer_size / sizeof(float);
-    uint64_t dst_size = buffer_size / sizeof(float);
-    
-    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
-    float *expected_val = (float *)malloc(dst_size * sizeof(float));
-    memset(write_count, 0, dst_size * sizeof(uint64_t));
-    
-    for (uint64_t i = 0; i < total_elements; i++) {
-        uint64_t iter = i / (vl * 8);
-        uint64_t pos_in_iter = i % (vl * 8);
-        uint64_t idx_pos = (iter % (index_pool_size / (vl * 8))) * (vl * 8) + pos_in_iter;
-        
-        if (idx_pos >= index_pool_size) continue;
-        
-        int32_t dst_elem_idx = indices[idx_pos];
-        if (dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
-            write_count[dst_elem_idx]++;
-            expected_val[dst_elem_idx] = src[i];
-        }
-    }
-    
-    int verified = 0;
-    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
-        if (write_count[i] == 1) {
-            if (dst[i] != expected_val[i] && errors < 5) {
-                if (errors == 0) {
-                    fprintf(stderr, "ST1W Scatter verify FAILED:\n");
-                }
-                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f (written once)\n",
-                        i, expected_val[i], dst[i]);
-                errors++;
-            }
-            verified++;
-        }
-    }
-    
-    free(write_count);
-    free(expected_val);
-    return errors;
-}
-
-static int verify_scatter_st1d(void *a, void *b, void *c) {
-    double *src = (double *)a;
-    double *dst = (double *)b;
-    int32_t *indices = gather_indices;
-    int errors = 0;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
-    uint64_t total_elements = buffer_size / sizeof(double);
-    uint64_t dst_size = buffer_size / sizeof(double);
-    
-    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
-    double *expected_val = (double *)malloc(dst_size * sizeof(double));
-    memset(write_count, 0, dst_size * sizeof(uint64_t));
-    
-    for (uint64_t i = 0; i < total_elements; i++) {
-        uint64_t iter = i / (vl_d * 4);
-        uint64_t pos_in_iter = i % (vl_d * 4);
-        uint64_t idx_pos = (iter % (index_pool_size / (vl_d * 4))) * (vl_d * 4) + pos_in_iter;
-        
-        if (idx_pos >= index_pool_size) continue;
-        
-        int32_t dst_elem_idx = indices[idx_pos];
-        if (dst_elem_idx >= 0 && dst_elem_idx < dst_size) {
-            write_count[dst_elem_idx]++;
-            expected_val[dst_elem_idx] = src[i];
-        }
-    }
-    
-    int verified = 0;
-    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
-        if (write_count[i] == 1) {
-            if (dst[i] != expected_val[i] && errors < 5) {
-                if (errors == 0) {
-                    fprintf(stderr, "ST1D Scatter verify FAILED:\n");
-                }
-                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f (written once)\n",
-                        i, expected_val[i], dst[i]);
-                errors++;
-            }
-            verified++;
-        }
-    }
-    
-    free(write_count);
-    free(expected_val);
-    return errors;
-}
-
-static int verify_gather_scatter_w(void *a, void *b, void *c) {
-    float *src = (float *)b;
-    float *dst = (float *)a;
-    int32_t *indices = gather_indices;
-    int errors = 0;
-    uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t total_elements = buffer_size / sizeof(float);
-    uint64_t src_size = buffer_size / sizeof(float);
-    uint64_t dst_size = buffer_size / sizeof(float);
-    
-    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
-    float *expected_val = (float *)malloc(dst_size * sizeof(float));
-    memset(write_count, 0, dst_size * sizeof(uint64_t));
-    
-    uint64_t idx_pool_iters = index_pool_size / (vl * 8);
-    if (idx_pool_iters < 1) idx_pool_iters = 1;
-    
-    for (uint64_t i = 0; i < total_elements; i++) {
-        uint64_t iter = i / (vl * 8);
-        uint64_t pos_in_iter = i % (vl * 8);
-        uint64_t idx_pos = (iter % idx_pool_iters) * (vl * 8) + pos_in_iter;
-        
-        if (idx_pos >= index_pool_size) continue;
-        
         int32_t elem_idx = indices[idx_pos];
         
-        if (elem_idx >= 0 && elem_idx < src_size && elem_idx < dst_size) {
+        if (is_double) {
+            double *src = (double *)src_ptr;
+            double *dst = (double *)dst_ptr;
+            if (src[elem_idx] != dst[i]) {
+                if (errors == 0) fprintf(stderr, "LD1SW+LD1D Gather verify FAILED:\n");
+                fprintf(stderr, "  dst[%lu]: expected %.1f (src[%d]), got %.1f\n", i, src[elem_idx], elem_idx, dst[i]);
+                errors++;
+            }
+        } else {
+            float *src = (float *)src_ptr;
+            float *dst = (float *)dst_ptr;
+            if (src[elem_idx] != dst[i]) {
+                if (errors == 0) fprintf(stderr, "LD1W Gather verify FAILED:\n");
+                fprintf(stderr, "  dst[%lu]: expected %.1f (src[%d]), got %.1f\n", i, src[elem_idx], elem_idx, dst[i]);
+                errors++;
+            }
+        }
+    }
+    return errors;
+}
+
+static int verify_scatter(void *src_ptr, void *dst_ptr, int is_double) {
+    int32_t *indices = gather_indices;
+    int errors = 0;
+    uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
+    uint64_t chunk = is_double ? vl * 4 : vl * 8;
+    uint64_t pool_iters = index_pool_size / chunk;
+    if (pool_iters < 1) pool_iters = 1;
+    uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
+    uint64_t dst_size = total;
+    
+    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
+    if (!write_count) { fprintf(stderr, "verify_scatter: malloc failed\n"); return -1; }
+    void *expected_val = malloc(dst_size * (is_double ? sizeof(double) : sizeof(float)));
+    if (!expected_val) { free(write_count); fprintf(stderr, "verify_scatter: malloc failed\n"); return -1; }
+    memset(write_count, 0, dst_size * sizeof(uint64_t));
+    
+    for (uint64_t i = 0; i < total; i++) {
+        uint64_t idx_pos = calc_idx_pos(i, chunk, pool_iters);
+        if (idx_pos >= index_pool_size) continue;
+        int32_t elem_idx = indices[idx_pos];
+        if (elem_idx >= 0 && elem_idx < dst_size) {
             write_count[elem_idx]++;
-            expected_val[elem_idx] = src[elem_idx];
+            if (is_double) ((double *)expected_val)[elem_idx] = ((double *)src_ptr)[i];
+            else ((float *)expected_val)[elem_idx] = ((float *)src_ptr)[i];
         }
     }
     
     int verified = 0;
     for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
         if (write_count[i] == 1) {
-            if (dst[i] != expected_val[i] && errors < 5) {
-                if (errors == 0) {
-                    fprintf(stderr, "Gather+Scatter W verify FAILED:\n");
+            if (is_double) {
+                double exp = ((double *)expected_val)[i], act = ((double *)dst_ptr)[i];
+                if (exp != act && errors < 5) {
+                    if (errors == 0) fprintf(stderr, "ST1D Scatter verify FAILED:\n");
+                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
+                    errors++;
                 }
-                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n",
-                        i, expected_val[i], dst[i]);
-                errors++;
+            } else {
+                float exp = ((float *)expected_val)[i], act = ((float *)dst_ptr)[i];
+                if (exp != act && errors < 5) {
+                    if (errors == 0) fprintf(stderr, "ST1W Scatter verify FAILED:\n");
+                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
+                    errors++;
+                }
             }
             verified++;
         }
@@ -597,48 +482,50 @@ static int verify_gather_scatter_w(void *a, void *b, void *c) {
     return errors;
 }
 
-static int verify_gather_scatter_d(void *a, void *b, void *c) {
-    double *src = (double *)b;
-    double *dst = (double *)a;
+static int verify_gather_scatter(void *dst_ptr, void *src_ptr, int is_double) {
     int32_t *indices = gather_indices;
     int errors = 0;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
-    uint64_t total_elements = buffer_size / sizeof(double);
-    uint64_t src_size = buffer_size / sizeof(double);
-    uint64_t dst_size = buffer_size / sizeof(double);
+    uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
+    uint64_t chunk = is_double ? vl * 4 : vl * 8;
+    uint64_t pool_iters = index_pool_size / chunk;
+    if (pool_iters < 1) pool_iters = 1;
+    uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
+    uint64_t size = total;
     
-    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
-    double *expected_val = (double *)malloc(dst_size * sizeof(double));
-    memset(write_count, 0, dst_size * sizeof(uint64_t));
+    uint64_t *write_count = (uint64_t *)malloc(size * sizeof(uint64_t));
+    if (!write_count) { fprintf(stderr, "verify_gather_scatter: malloc failed\n"); return -1; }
+    void *expected_val = malloc(size * (is_double ? sizeof(double) : sizeof(float)));
+    if (!expected_val) { free(write_count); fprintf(stderr, "verify_gather_scatter: malloc failed\n"); return -1; }
+    memset(write_count, 0, size * sizeof(uint64_t));
     
-    uint64_t idx_pool_iters = index_pool_size / (vl_d * 4);
-    if (idx_pool_iters < 1) idx_pool_iters = 1;
-    
-    for (uint64_t i = 0; i < total_elements; i++) {
-        uint64_t iter = i / (vl_d * 4);
-        uint64_t pos_in_iter = i % (vl_d * 4);
-        uint64_t idx_pos = (iter % idx_pool_iters) * (vl_d * 4) + pos_in_iter;
-        
+    for (uint64_t i = 0; i < total; i++) {
+        uint64_t idx_pos = calc_idx_pos(i, chunk, pool_iters);
         if (idx_pos >= index_pool_size) continue;
-        
         int32_t elem_idx = indices[idx_pos];
-        
-        if (elem_idx >= 0 && elem_idx < src_size && elem_idx < dst_size) {
+        if (elem_idx >= 0 && elem_idx < size) {
             write_count[elem_idx]++;
-            expected_val[elem_idx] = src[elem_idx];
+            if (is_double) ((double *)expected_val)[elem_idx] = ((double *)src_ptr)[elem_idx];
+            else ((float *)expected_val)[elem_idx] = ((float *)src_ptr)[elem_idx];
         }
     }
     
     int verified = 0;
-    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
+    for (uint64_t i = 0; i < size && verified < 100; i++) {
         if (write_count[i] == 1) {
-            if (dst[i] != expected_val[i] && errors < 5) {
-                if (errors == 0) {
-                    fprintf(stderr, "Gather+Scatter D verify FAILED:\n");
+            if (is_double) {
+                double exp = ((double *)expected_val)[i], act = ((double *)dst_ptr)[i];
+                if (exp != act && errors < 5) {
+                    if (errors == 0) fprintf(stderr, "Gather+Scatter D verify FAILED:\n");
+                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
+                    errors++;
                 }
-                fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n",
-                        i, expected_val[i], dst[i]);
-                errors++;
+            } else {
+                float exp = ((float *)expected_val)[i], act = ((float *)dst_ptr)[i];
+                if (exp != act && errors < 5) {
+                    if (errors == 0) fprintf(stderr, "Gather+Scatter W verify FAILED:\n");
+                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
+                    errors++;
+                }
             }
             verified++;
         }
@@ -846,6 +733,9 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
     
+    buffer_size = (buffer_size / 2048) * 2048;
+    if (buffer_size < 2048) buffer_size = 2048;
+    
     index_pool_size = (uint64_t)(sparsity * (buffer_size / sizeof(int64_t)));
     uint64_t vl_test = svcntb() / sizeof(int64_t);
     uint64_t vl_test_32 = svcntb() / sizeof(int32_t);
@@ -1005,17 +895,17 @@ int main(int argc, char *argv[]) {
         
         int verify_result = 0;
         if (test->func == sve_gather_ld1w_ld1w) {
-            verify_result = verify_gather_ld1w_ld1w(a, b, c);
+            verify_result = verify_gather(a, b, 0);
         } else if (test->func == sve_gather_ld1sw_ld1d) {
-            verify_result = verify_gather_ld1sw_ld1d(a, b, c);
+            verify_result = verify_gather(a, c, 1);
         } else if (test->func == sve_scatter_st1w) {
-            verify_result = verify_scatter_st1w(a, b, c);
+            verify_result = verify_scatter(a, b, 0);
         } else if (test->func == sve_scatter_st1d) {
-            verify_result = verify_scatter_st1d(a, b, c);
+            verify_result = verify_scatter(a, b, 1);
         } else if (test->func == sve_gather_scatter_w) {
-            verify_result = verify_gather_scatter_w(a, b, c);
+            verify_result = verify_gather_scatter(a, b, 0);
         } else if (test->func == sve_gather_scatter_d) {
-            verify_result = verify_gather_scatter_d(a, b, c);
+            verify_result = verify_gather_scatter(a, b, 1);
         }
         
 #ifdef USE_MPI

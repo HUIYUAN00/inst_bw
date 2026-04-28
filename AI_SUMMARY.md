@@ -356,6 +356,14 @@ SVE Gather LD1W                 Gather       3.81      4.404         16  VERIFY_
 #### 结果验证机制
 
 ```c
+// 通用验证函数（重构后）
+verify_gather(dst_ptr, src_ptr, is_double)     // is_double=0: float, 1: double
+verify_scatter(src_ptr, dst_ptr, is_double)    // Scatter验证
+verify_gather_scatter(dst_ptr, src_ptr, is_double)  // Gather+Scatter验证
+
+// 辅助函数
+calc_idx_pos(i, chunk, pool_iters)  // 索引位置计算
+
 // Gather验证
 dst[i]应该等于src[indices[i]]
 
@@ -379,13 +387,11 @@ sve_scatter_st1d()           // 测试3
 sve_gather_scatter_w()       // 测试4
 sve_gather_scatter_d()       // 测试5
 
-// 验证函数
-verify_gather_ld1w_ld1w()
-verify_gather_ld1sw_ld1d()
-verify_scatter_st1w()
-verify_scatter_st1d()
-verify_gather_scatter_w()
-verify_gather_scatter_d()
+// 验证函数（通用化重构）
+verify_gather(dst, src, is_double)      // Gather验证，is_double控制类型
+verify_scatter(src, dst, is_double)     // Scatter验证
+verify_gather_scatter(dst, src, is_double)  // Gather+Scatter验证
+calc_idx_pos(i, chunk, pool_iters)      // 索引位置计算辅助函数
 
 // 辅助函数
 get_bandwidth()
@@ -432,6 +438,16 @@ max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
 --mca btl ^openib --mca mtl ^ofi
 ```
 
+#### buffer_size对齐
+
+```c
+// SVE256专用: VL=256 bytes, chunk=VL*8=2048 bytes
+buffer_size = (buffer_size / 2048) * 2048;
+if (buffer_size < 2048) buffer_size = 2048;
+```
+
+确保buffer_size对齐到2048字节边界，避免SVE汇编循环截断。
+
 ### 相关文件
 
 | 文件 | 说明 |
@@ -470,12 +486,16 @@ max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
 - 汇编使用ARM64分支指令实现循环
 - Gather+Scatter语义：dst[idx[i]] = src[idx[i]]
 - MPI输出默认仅rank0汇总
+- buffer_size对齐到2048字节（SVE256专用）
+- 验证函数通用化：3个函数替代6个，is_double参数控制类型
 
 ### Bug修复
 
 1. **索引越界**: 使用int64_t元素数量计算max_idx
 2. **索引池不足**: 设置min_indices = vl * 32
 3. **Uniform分布**: 添加remainder分配逻辑
+4. **malloc校验**: 验证函数添加malloc返回值检查
+5. **buffer对齐**: 修复SVE循环截断问题
 
 ---
 
