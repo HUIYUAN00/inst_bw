@@ -391,7 +391,13 @@ static int verify_gather(void *dst_ptr, void *src_ptr, int is_double) {
     return errors;
 }
 
-static int verify_scatter(void *src_ptr, void *dst_ptr, int is_double) {
+static inline void update_index_stats(uint64_t idx, uint64_t *min_idx, uint64_t *max_found, uint64_t *coverage) {
+    if (idx < *min_idx) *min_idx = idx;
+    if (idx > *max_found) *max_found = idx;
+    coverage[idx / 64] |= (1ULL << (idx % 64));
+}
+
+static int verify_scatter_common(void *src_ptr, void *dst_ptr, int is_double, int gather_mode, const char *test_name) {
     int32_t *indices = gather_indices;
     int errors = 0;
     uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
@@ -399,40 +405,44 @@ static int verify_scatter(void *src_ptr, void *dst_ptr, int is_double) {
     uint64_t pool_iters = index_pool_size / chunk;
     if (pool_iters < 1) pool_iters = 1;
     uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
-    uint64_t dst_size = total;
     
-    uint64_t *write_count = (uint64_t *)malloc(dst_size * sizeof(uint64_t));
-    if (!write_count) { fprintf(stderr, "verify_scatter: malloc failed\n"); return -1; }
-    void *expected_val = malloc(dst_size * (is_double ? sizeof(double) : sizeof(float)));
-    if (!expected_val) { free(write_count); fprintf(stderr, "verify_scatter: malloc failed\n"); return -1; }
-    memset(write_count, 0, dst_size * sizeof(uint64_t));
+    uint64_t *write_count = (uint64_t *)malloc(total * sizeof(uint64_t));
+    if (!write_count) { fprintf(stderr, "%s: malloc failed\n", test_name); return -1; }
+    void *expected_val = malloc(total * (is_double ? sizeof(double) : sizeof(float)));
+    if (!expected_val) { free(write_count); fprintf(stderr, "%s: malloc failed\n", test_name); return -1; }
+    memset(write_count, 0, total * sizeof(uint64_t));
     
     for (uint64_t i = 0; i < total; i++) {
         uint64_t idx_pos = calc_idx_pos(i, chunk, pool_iters);
         if (idx_pos >= index_pool_size) continue;
         int32_t elem_idx = indices[idx_pos];
-        if (elem_idx >= 0 && elem_idx < dst_size) {
+        if (elem_idx >= 0 && elem_idx < total) {
             write_count[elem_idx]++;
-            if (is_double) ((double *)expected_val)[elem_idx] = ((double *)src_ptr)[i];
-            else ((float *)expected_val)[elem_idx] = ((float *)src_ptr)[i];
+            uint64_t src_idx = gather_mode ? elem_idx : i;
+            if (is_double) ((double *)expected_val)[elem_idx] = ((double *)src_ptr)[src_idx];
+            else ((float *)expected_val)[elem_idx] = ((float *)src_ptr)[src_idx];
         }
     }
     
     int verified = 0;
-    for (uint64_t i = 0; i < dst_size && verified < 100; i++) {
+    for (uint64_t i = 0; i < total && verified < 100; i++) {
         if (write_count[i] == 1) {
+            double exp_d, act_d;
+            float exp_f, act_f;
             if (is_double) {
-                double exp = ((double *)expected_val)[i], act = ((double *)dst_ptr)[i];
-                if (exp != act && errors < 5) {
-                    if (errors == 0) fprintf(stderr, "ST1D Scatter verify FAILED:\n");
-                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
+                exp_d = ((double *)expected_val)[i];
+                act_d = ((double *)dst_ptr)[i];
+                if (exp_d != act_d && errors < 5) {
+                    if (errors == 0) fprintf(stderr, "%s verify FAILED:\n", test_name);
+                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp_d, act_d);
                     errors++;
                 }
             } else {
-                float exp = ((float *)expected_val)[i], act = ((float *)dst_ptr)[i];
-                if (exp != act && errors < 5) {
-                    if (errors == 0) fprintf(stderr, "ST1W Scatter verify FAILED:\n");
-                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
+                exp_f = ((float *)expected_val)[i];
+                act_f = ((float *)dst_ptr)[i];
+                if (exp_f != act_f && errors < 5) {
+                    if (errors == 0) fprintf(stderr, "%s verify FAILED:\n", test_name);
+                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp_f, act_f);
                     errors++;
                 }
             }
@@ -445,58 +455,14 @@ static int verify_scatter(void *src_ptr, void *dst_ptr, int is_double) {
     return errors;
 }
 
+static int verify_scatter(void *src_ptr, void *dst_ptr, int is_double) {
+    const char *name = is_double ? "ST1D Scatter" : "ST1W Scatter";
+    return verify_scatter_common(src_ptr, dst_ptr, is_double, 0, name);
+}
+
 static int verify_gather_scatter(void *dst_ptr, void *src_ptr, int is_double) {
-    int32_t *indices = gather_indices;
-    int errors = 0;
-    uint64_t vl = is_double ? svcntb() / sizeof(int64_t) : svcntb() / sizeof(int32_t);
-    uint64_t chunk = vl * 4;
-    uint64_t pool_iters = index_pool_size / chunk;
-    if (pool_iters < 1) pool_iters = 1;
-    uint64_t total = buffer_size / (is_double ? sizeof(double) : sizeof(float));
-    uint64_t size = total;
-    
-    uint64_t *write_count = (uint64_t *)malloc(size * sizeof(uint64_t));
-    if (!write_count) { fprintf(stderr, "verify_gather_scatter: malloc failed\n"); return -1; }
-    void *expected_val = malloc(size * (is_double ? sizeof(double) : sizeof(float)));
-    if (!expected_val) { free(write_count); fprintf(stderr, "verify_gather_scatter: malloc failed\n"); return -1; }
-    memset(write_count, 0, size * sizeof(uint64_t));
-    
-    for (uint64_t i = 0; i < total; i++) {
-        uint64_t idx_pos = calc_idx_pos(i, chunk, pool_iters);
-        if (idx_pos >= index_pool_size) continue;
-        int32_t elem_idx = indices[idx_pos];
-        if (elem_idx >= 0 && elem_idx < size) {
-            write_count[elem_idx]++;
-            if (is_double) ((double *)expected_val)[elem_idx] = ((double *)src_ptr)[elem_idx];
-            else ((float *)expected_val)[elem_idx] = ((float *)src_ptr)[elem_idx];
-        }
-    }
-    
-    int verified = 0;
-    for (uint64_t i = 0; i < size && verified < 100; i++) {
-        if (write_count[i] == 1) {
-            if (is_double) {
-                double exp = ((double *)expected_val)[i], act = ((double *)dst_ptr)[i];
-                if (exp != act && errors < 5) {
-                    if (errors == 0) fprintf(stderr, "Gather+Scatter D verify FAILED:\n");
-                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
-                    errors++;
-                }
-            } else {
-                float exp = ((float *)expected_val)[i], act = ((float *)dst_ptr)[i];
-                if (exp != act && errors < 5) {
-                    if (errors == 0) fprintf(stderr, "Gather+Scatter W verify FAILED:\n");
-                    fprintf(stderr, "  dst[%lu]: expected %.1f, got %.1f\n", i, exp, act);
-                    errors++;
-                }
-            }
-            verified++;
-        }
-    }
-    
-    free(write_count);
-    free(expected_val);
-    return errors;
+    const char *name = is_double ? "Gather+Scatter D" : "Gather+Scatter W";
+    return verify_scatter_common(src_ptr, dst_ptr, is_double, 1, name);
 }
 
 //=== End
@@ -741,28 +707,29 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    memset(a, 0x55, buffer_size);
-    memset(b, 0xAA, buffer_size);
-    memset(c, 0x33, buffer_size);
+    double *da = (double *)a, *db = (double *)b, *dc = (double *)c;
+    uint64_t elem_count = buffer_size / sizeof(double);
+    for (uint64_t i = 0; i < elem_count; i++) {
+        da[i] = 1.0;
+        db[i] = 2.0;
+        dc[i] = 3.0;
+    }
     
     srand(42);
     uint64_t max_element_idx_64 = buffer_size / sizeof(int64_t) - 1;
     uint64_t max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
     
     uint64_t min_idx = max_idx, max_found = 0;
-    uint64_t *coverage = (uint64_t *)calloc((max_idx / 64) + 2, sizeof(uint64_t));
+    uint64_t coverage_buckets = (max_idx / 64) + 2;
+    uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
     
     const char *mode_names[] = {"Random", "Uniform", "Hotspot"};
     
     if (index_mode == 0) {
         for (uint64_t i = 0; i < index_pool_size; i++) {
-            uint64_t rand_val = ((uint64_t)rand() << 32) | rand();
-            uint64_t idx = rand_val % (max_idx + 1);
+            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
             gather_indices[i] = (int32_t)idx;
-            
-            if (idx < min_idx) min_idx = idx;
-            if (idx > max_found) max_found = idx;
-            coverage[idx / 64] |= (1ULL << (idx % 64));
+            update_index_stats(idx, &min_idx, &max_found, coverage);
         }
     } else if (index_mode == 1) {
         uint64_t stride = (max_idx + 1) / index_pool_size;
@@ -770,40 +737,25 @@ int main(int argc, char *argv[]) {
         uint64_t remainder = (max_idx + 1) - stride * index_pool_size;
         for (uint64_t i = 0; i < index_pool_size; i++) {
             uint64_t base = i * stride + (i < remainder ? i : remainder);
-            uint64_t offset = ((uint64_t)rand() << 32 | rand()) % stride;
-            uint64_t idx = base + offset;
+            uint64_t idx = base + (((uint64_t)rand() << 32 | rand()) % stride);
             if (idx > max_idx) idx = max_idx;
             gather_indices[i] = (int32_t)idx;
-            
-            if (idx < min_idx) min_idx = idx;
-            if (idx > max_found) max_found = idx;
-            coverage[idx / 64] |= (1ULL << (idx % 64));
+            update_index_stats(idx, &min_idx, &max_found, coverage);
         }
-    } else if (index_mode == 2) {
+    } else {
         uint64_t hotspot_size = (max_idx + 1) / 10;
         uint64_t hotspot_start = (uint64_t)rand() % (max_idx + 1 - hotspot_size);
-        uint64_t hotspot_end = hotspot_start + hotspot_size;
-        uint64_t hotspot_prob = 80;
-        
         for (uint64_t i = 0; i < index_pool_size; i++) {
-            uint64_t idx;
-            if (((uint64_t)rand() % 100) < hotspot_prob) {
-                idx = hotspot_start + ((uint64_t)rand() % hotspot_size);
-            } else {
-                uint64_t rand_val = ((uint64_t)rand() << 32) | rand();
-                idx = rand_val % (max_idx + 1);
-            }
+            uint64_t idx = (rand() % 100 < 80) ? 
+                hotspot_start + ((uint64_t)rand() % hotspot_size) :
+                ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
             gather_indices[i] = (int32_t)idx;
-            
-            if (idx < min_idx) min_idx = idx;
-            if (idx > max_found) max_found = idx;
-            coverage[idx / 64] |= (1ULL << (idx % 64));
+            update_index_stats(idx, &min_idx, &max_found, coverage);
         }
     }
     
     uint64_t covered = 0;
-    uint64_t coverage_buckets = (max_idx / 64) + 1;
-    for (uint64_t i = 0; i < coverage_buckets; i++) {
+    for (uint64_t i = 0; i < coverage_buckets - 1; i++) {
         covered += __builtin_popcountll(coverage[i]);
     }
     free(coverage);
@@ -816,15 +768,6 @@ int main(int argc, char *argv[]) {
                (double)covered / index_pool_size * 100.0);
         printf("Coverage: %.4f%% of buffer\n\n", 
                (double)covered / (max_idx + 1) * 100.0);
-    }
-    
-    double *da = (double *)a;
-    double *db = (double *)b;
-    double *dc = (double *)c;
-    for (uint64_t i = 0; i < buffer_size / sizeof(double); i++) {
-        da[i] = 1.0;
-        db[i] = 2.0;
-        dc[i] = 3.0;
     }
     
     if (rank == 0) {

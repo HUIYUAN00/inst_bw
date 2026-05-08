@@ -2,4 +2,5 @@ sve_bw_test
 sve_bw_test_mpi
 gather_scatter_test
 gather_scatter_test_mpi
+stream_omp_test
 *.o
