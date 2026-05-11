@@ -18,7 +18,6 @@ typedef struct {
     const char *name;
     const char *category;
     void (*func)(void *a, void *b, void *c, uint64_t size, double scalar);
-    uint64_t bytes_per_iter;
 } test_item_t;
 
 static inline double get_bandwidth(uint64_t bytes, double time_sec) {
@@ -468,26 +467,26 @@ static void stream_triad(void *a, void *b, void *c, uint64_t size, double scalar
 //=== TEST_REGISTRY
 
 static test_item_t test_registry[] = {
-    {"NEON LDP (Read)",      "Load",    neon_ldp_read,        0},
-    {"NEON STP (Write)",     "Store",   neon_stp_write,       0},
-    {"NEON LDP+STP (Copy)",  "Copy",    neon_ldp_stp_copy,    0},
+    {"NEON LDP (Read)",      "Load",    neon_ldp_read},
+    {"NEON STP (Write)",     "Store",   neon_stp_write},
+    {"NEON LDP+STP (Copy)",  "Copy",    neon_ldp_stp_copy},
     
-    {"SVE LD1B (Read)",      "Load",    sve_ld1b_read,        0},
-    {"SVE ST1B (Write)",     "Store",   sve_st1b_write,       0},
-    {"SVE LD1B+ST1B (Copy)", "Copy",    sve_ld1b_st1b_copy,   0},
+    {"SVE LD1B (Read)",      "Load",    sve_ld1b_read},
+    {"SVE ST1B (Write)",     "Store",   sve_st1b_write},
+    {"SVE LD1B+ST1B (Copy)", "Copy",    sve_ld1b_st1b_copy},
     
-    {"SVE LD1W (Read)",      "Load",    sve_ld1w_read,        0},
-    {"SVE ST1W (Write)",     "Store",   sve_st1w_write,       0},
-    {"SVE LD1W+ST1W (Copy)", "Copy",    sve_ld1w_st1w_copy,   0},
+    {"SVE LD1W (Read)",      "Load",    sve_ld1w_read},
+    {"SVE ST1W (Write)",     "Store",   sve_st1w_write},
+    {"SVE LD1W+ST1W (Copy)", "Copy",    sve_ld1w_st1w_copy},
     
-    {"SVE LD1D (Read)",      "Load",    sve_ld1d_read,        0},
-    {"SVE ST1D (Write)",     "Store",   sve_st1d_write,       0},
-    {"SVE LD1D+ST1D (Copy)", "Copy",    sve_ld1d_st1d_copy,   0},
+    {"SVE LD1D (Read)",      "Load",    sve_ld1d_read},
+    {"SVE ST1D (Write)",     "Store",   sve_st1d_write},
+    {"SVE LD1D+ST1D (Copy)", "Copy",    sve_ld1d_st1d_copy},
     
-    {"STREAM Copy",          "STREAM",  stream_copy,          0},
-    {"STREAM Scale",         "STREAM",  stream_scale,         0},
-    {"STREAM Add",           "STREAM",  stream_add,           0},
-    {"STREAM Triad",         "STREAM",  stream_triad,         0},
+    {"STREAM Copy",          "STREAM",  stream_copy},
+    {"STREAM Scale",         "STREAM",  stream_scale},
+    {"STREAM Add",           "STREAM",  stream_add},
+    {"STREAM Triad",         "STREAM",  stream_triad},
 };
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);

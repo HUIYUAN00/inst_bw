@@ -23,9 +23,6 @@ typedef struct {
     const char *name;
     const char *category;
     void (*func)(void *a, void *b, void *c, uint64_t size, double scalar);
-    uint64_t bytes_per_iter;
-    int requires_c;
-    int requires_scalar;
 } test_item_t;
 
 static inline double get_bandwidth(uint64_t bytes, double time_sec) {
@@ -470,12 +467,12 @@ static int verify_gather_scatter(void *dst_ptr, void *src_ptr, int is_double) {
 //=== TEST_REGISTRY
 
 static test_item_t test_registry[] = {
-    {"SVE Gather LD1W",           "Gather",        sve_gather_ld1w_ld1w,      0,  0, 0},
-    {"SVE Gather LD1SW+LD1D",     "Gather",        sve_gather_ld1sw_ld1d,     0,  1, 0},
-    {"SVE Scatter ST1W",          "Scatter",       sve_scatter_st1w,          0,  0, 0},
-    {"SVE Scatter ST1D",          "Scatter",       sve_scatter_st1d,          0,  0, 0},
-    {"SVE Gather+Scatter W",      "GatherScatter", sve_gather_scatter_w,      0,  0, 0},
-    {"SVE Gather+Scatter D",      "GatherScatter", sve_gather_scatter_d,      0,  0, 0},
+    {"SVE Gather LD1W",           "Gather",        sve_gather_ld1w_ld1w},
+    {"SVE Gather LD1SW+LD1D",     "Gather",        sve_gather_ld1sw_ld1d},
+    {"SVE Scatter ST1W",          "Scatter",       sve_scatter_st1w},
+    {"SVE Scatter ST1D",          "Scatter",       sve_scatter_st1d},
+    {"SVE Gather+Scatter W",      "GatherScatter", sve_gather_scatter_w},
+    {"SVE Gather+Scatter D",      "GatherScatter", sve_gather_scatter_d},
 };
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);

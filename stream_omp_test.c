@@ -17,7 +17,6 @@ typedef struct {
     const char *name;
     const char *category;
     void (*func)(double *a, double *b, double *c, uint64_t size, double scalar, int threads);
-    uint64_t bytes_per_iter;
 } test_item_t;
 
 static inline double get_bandwidth(uint64_t bytes, double time_sec) {
@@ -101,10 +100,10 @@ static void stream_triad(double *a, double *b, double *c, uint64_t size, double 
 #pragma GCC pop_options
 
 static test_item_t test_registry[] = {
-    {"STREAM Copy",  "STREAM",  stream_copy,  0},
-    {"STREAM Scale", "STREAM",  stream_scale, 0},
-    {"STREAM Add",   "STREAM",  stream_add,   0},
-    {"STREAM Triad", "STREAM",  stream_triad, 0},
+    {"STREAM Copy",  "STREAM",  stream_copy},
+    {"STREAM Scale", "STREAM",  stream_scale},
+    {"STREAM Add",   "STREAM",  stream_add},
+    {"STREAM Triad", "STREAM",  stream_triad},
 };
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);
