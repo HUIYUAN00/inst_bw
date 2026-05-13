@@ -388,6 +388,12 @@ static int verify_gather(void *dst_ptr, void *src_ptr, int is_double) {
     return errors;
 }
 
+static int compare_uint64(const void *a, const void *b) {
+    uint64_t ua = *(const uint64_t *)a;
+    uint64_t ub = *(const uint64_t *)b;
+    return (ua < ub) ? -1 : (ua > ub) ? 1 : 0;
+}
+
 static inline void update_index_stats(uint64_t idx, uint64_t *min_idx, uint64_t *max_found, uint64_t *coverage) {
     if (idx < *min_idx) *min_idx = idx;
     if (idx > *max_found) *max_found = idx;
@@ -485,7 +491,7 @@ static void print_usage(const char *prog_name) {
     printf("  -b, --buffer-size <MB>  Buffer size in MB (default: 128)\n");
     printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 0.01)\n");
     printf("  -m, --index-mode <N>    Index generation mode (default: 0)\n");
-    printf("                           0: Random, 1: Uniform, 2: Hotspot\n");
+    printf("                           0: Random, 1: Uniform, 2: Hotspot, 3: RandomUniqueSorted\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
@@ -622,7 +628,7 @@ int main(int argc, char *argv[]) {
             if (i + 1 < argc) {
                 index_mode = atoi(argv[++i]);
                 if (index_mode < 0) index_mode = 0;
-                if (index_mode > 2) index_mode = 2;
+                if (index_mode > 3) index_mode = 3;
             }
             continue;
         }
@@ -720,7 +726,7 @@ int main(int argc, char *argv[]) {
     uint64_t coverage_buckets = (max_idx / 64) + 2;
     uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
     
-    const char *mode_names[] = {"Random", "Uniform", "Hotspot"};
+    const char *mode_names[] = {"Random", "Uniform", "Hotspot", "RandomUniqueSorted"};
     
     if (index_mode == 0) {
         for (uint64_t i = 0; i < index_pool_size; i++) {
@@ -739,7 +745,7 @@ int main(int argc, char *argv[]) {
             gather_indices[i] = (int32_t)idx;
             update_index_stats(idx, &min_idx, &max_found, coverage);
         }
-    } else {
+    } else if (index_mode == 2) {
         uint64_t hotspot_size = (max_idx + 1) / 10;
         uint64_t hotspot_start = (uint64_t)rand() % (max_idx + 1 - hotspot_size);
         for (uint64_t i = 0; i < index_pool_size; i++) {
@@ -749,6 +755,43 @@ int main(int argc, char *argv[]) {
             gather_indices[i] = (int32_t)idx;
             update_index_stats(idx, &min_idx, &max_found, coverage);
         }
+    } else {
+        uint64_t max_unique = (max_idx + 1 < index_pool_size) ? max_idx + 1 : index_pool_size;
+        uint64_t *unique_indices = (uint64_t *)malloc(max_unique * sizeof(uint64_t));
+        uint64_t unique_count = 0;
+        int attempts = 0;
+        int max_attempts = index_pool_size * 20;
+        
+        while (unique_count < max_unique && attempts < max_attempts) {
+            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
+            uint64_t bucket = idx / 64;
+            uint64_t bit = idx % 64;
+            if (!(coverage[bucket] & (1ULL << bit))) {
+                coverage[bucket] |= (1ULL << bit);
+                unique_indices[unique_count++] = idx;
+                if (idx < min_idx) min_idx = idx;
+                if (idx > max_found) max_found = idx;
+            }
+            attempts++;
+        }
+        
+        for (uint64_t i = 0; i <= max_idx && unique_count < max_unique; i++) {
+            uint64_t bucket = i / 64;
+            uint64_t bit = i % 64;
+            if (!(coverage[bucket] & (1ULL << bit))) {
+                coverage[bucket] |= (1ULL << bit);
+                unique_indices[unique_count++] = i;
+                if (i < min_idx) min_idx = i;
+                if (i > max_found) max_found = i;
+            }
+        }
+        
+        qsort(unique_indices, unique_count, sizeof(uint64_t), compare_uint64);
+        index_pool_size = unique_count;
+        for (uint64_t i = 0; i < unique_count; i++) {
+            gather_indices[i] = (int32_t)unique_indices[i];
+        }
+        free(unique_indices);
     }
     
     uint64_t covered = 0;

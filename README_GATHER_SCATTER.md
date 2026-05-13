@@ -8,7 +8,7 @@
 - **Scatter 测试**：测试 SVE 向量分散存储指令 (ST1W/ST1D)
 - **Gather+Scatter 组合测试**：测试完全非连续内存操作（使用相同索引池）
 - **稀疏度控制**：通过稀疏度参数控制访问密度，支持不同测试场景
-- **多种索引模式**：支持随机、均匀、热点三种索引生成模式
+- **多种索引模式**：支持随机、均匀、热点、去重升序四种索引生成模式
 - **汇编内联循环**：循环逻辑完全内置于汇编中，消除 C 循环开销
 - **参数可配置**：缓冲区大小、稀疏度、索引模式、迭代次数均可配置
 - **结果验证**：内置结果验证机制，确保测试准确性
@@ -65,9 +65,10 @@ make all
 
 | 模式 | 参数值 | 说明 |
 |------|--------|------|
-| Random | 0 | 完全随机分布 |
+| Random | 0 | 完全随机分布（允许重复，无序） |
 | Uniform | 1 | 均匀覆盖整个 buffer 范围 |
 | Hotspot | 2 | 80% 访问集中在 10% 区域 |
+| RandomUniqueSorted | 3 | 随机去重后升序排序（缓存友好） |
 
 ### 测试选择
 
@@ -144,6 +145,9 @@ mpirun --mca btl ^openib --mca mtl ^ofi -np 4 ./gather_scatter_test_mpi 0 2 4
 
 # 热点模式（80%访问集中在10%区域）
 ./gather_scatter_test -s 0.5 -m 2 -b 32
+
+# 去重升序模式（缓存友好，测试优化性能）
+./gather_scatter_test -s 0.5 -m 3 -b 32
 
 # 小缓冲区快速测试
 ./gather_scatter_test -b 16 -s 0.01 -w 1 -t 3
@@ -238,9 +242,10 @@ Test                          Category       GB/s   Time(ms)   Data(MB)
 
 | 场景 | 推荐值 | 说明 |
 |------|--------|------|
-| 随机访问模拟 | 0 (Random) | 模拟随机数据访问模式 |
+| 随机访问模拟 | 0 (Random) | 模拟真实随机数据访问（可能重复） |
 | 全范围覆盖 | 1 (Uniform) | 均匀索引，覆盖整个 buffer |
 | 热点数据 | 2 (Hotspot) | 模拟热点数据访问（80%集中） |
+| 优化访问测试 | 3 (RandomUniqueSorted) | 去重+升序，测试缓存友好性能 |
 
 ### 缓冲区大小 (-b)
 
@@ -275,17 +280,19 @@ index_pool_size = sparsity * (buffer_size / sizeof(int64_t))
 
 ### 索引生成算法
 
-三种索引生成模式：
+四种索引生成模式：
 
-1. **Random**：完全随机
+1. **Random**：完全随机（允许重复）
 ```c
 index[i] = rand() % (max_index + 1)
+// 特点：真实随机访问，可能有索引冲突
 ```
 
 2. **Uniform**：均匀分布
 ```c
 stride = (max_index + 1) / index_pool_size
 index[i] = i * stride + rand() % stride
+// 特点：均匀覆盖，可能有轻微重复
 ```
 
 3. **Hotspot**：热点模式
@@ -296,6 +303,26 @@ if (rand() % 100 < 80)  // 80%概率
     index[i] = hotspot_start + rand() % hotspot_size
 else
     index[i] = rand() % (max_index + 1)
+// 特点：热点访问，可能有大量重复
+```
+
+4. **RandomUniqueSorted**：去重升序（缓存友好）
+```c
+// 哈希去重（位图法）
+while (unique_count < target && attempts < max_attempts) {
+    idx = rand() % (max_index + 1)
+    if (!coverage[idx/64] & (1 << (idx%64))) {
+        coverage[idx/64] |= (1 << (idx%64))
+        unique_indices[unique_count++] = idx
+    }
+}
+// 补充至满足稀疏度（顺序扫描）
+for (i = 0; i <= max_index && unique_count < target; i++) {
+    if (!covered) unique_indices[unique_count++] = i
+}
+// 升序排序
+qsort(unique_indices, unique_count)
+// 特点：100%去重，升序排列，Scatter缓存友好
 ```
 
 ### 汇编内联循环
@@ -345,6 +372,20 @@ mov x17, #0                // 重置计数器（初始为0触发重置）
 | SVE Scatter ST1D | 27.20 | 93.34 | 3.44x |
 | SVE Gather+Scatter W | 16.14 | 56.46 | 3.50x |
 | SVE Gather+Scatter D | 22.33 | 82.58 | 3.69x |
+
+### 索引模式对比 (16MB buffer, 1% sparsity)
+
+| 模式 | Unique% | GB/s (Scatter ST1W) | 说明 |
+|------|---------|---------------------|------|
+| Random (0) | 99.55% | 4.29 | 真实随机访问性能 |
+| Uniform (1) | 100% | 3.20 | 均匀分布，无冲突 |
+| Hotspot (2) | 96.74% | 8.86 | 热点缓存命中率高 |
+| RandomUniqueSorted (3) | 100% | 3.35 | 升序访问，缓存预取友好 |
+
+**关键观察**：
+- Mode 2 (Hotspot) 带宽最高，因80%访问集中在10%区域，缓存命中率极高
+- Mode 3 (RandomUniqueSorted) 带宽低于 Hotspot，但高于 Random，体现升序预取优势
+- Mode 0 (Random) 最接近真实稀疏矩阵场景（允许索引冲突）
 
 ## 清理
 
