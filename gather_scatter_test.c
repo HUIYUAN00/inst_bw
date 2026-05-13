@@ -1238,13 +1238,13 @@ static void print_usage(const char *prog_name) {
 
 static void print_tests(void) {
     printf("Available Tests:\n");
-    printf("============================================================\n");
-    printf("%-4s %-22s %15s\n", "Idx", "Test Name", "Category");
-    printf("============================================================\n");
+    printf("================================================================================\n");
+    printf("%-4s %-38s %14s\n", "Idx", "Test Name", "Category");
+    printf("================================================================================\n");
     for (int i = 0; i < test_count; i++) {
-        printf("%-4d %-22s %15s\n", i, test_registry[i].name, test_registry[i].category);
+        printf("%-4d %-38s %14s\n", i, test_registry[i].name, test_registry[i].category);
     }
-    printf("============================================================\n");
+    printf("================================================================================\n");
 }
 
 static int should_run_test(int test_idx, int num_specs, char **specs) {
@@ -1406,13 +1406,13 @@ int main(int argc, char *argv[]) {
     uint64_t vl = svcntb();
     
     if (rank == 0) {
-        printf("============================================================\n");
+        printf("================================================================================\n");
 #ifdef USE_MPI
         printf("SVE Gather/Scatter Bandwidth Benchmark (MPI - %d processes)\n", nprocs);
 #else
         printf("SVE Gather/Scatter Bandwidth Benchmark\n");
 #endif
-        printf("============================================================\n");
+        printf("================================================================================\n");
         printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
         printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
         printf("Sparsity: %.4f (%.2f%%)\n", sparsity, sparsity * 100);
@@ -1539,13 +1539,13 @@ int main(int argc, char *argv[]) {
     
     if (rank == 0) {
 #ifdef USE_MPI
-        printf("%-22s %15s %10s %10s %10s %10s\n", 
+        printf("%-38s %14s %10s %10s %10s %10s\n", 
                "Test", "Category", "GB/s", "Time(ms)", "Data(MB)", "Total(GB/s)");
 #else
-        printf("%-22s %15s %10s %10s %10s\n", 
+        printf("%-38s %14s %10s %10s %10s\n", 
                "Test", "Category", "GB/s", "Time(ms)", "Data(MB)");
 #endif
-        printf("============================================================\n");
+        printf("================================================================================\n");
     }
     
     for (int i = 0; i < test_count; i++) {
@@ -1596,16 +1596,16 @@ int main(int argc, char *argv[]) {
         if (rank == 0 || print_all_ranks) {
 #ifdef USE_MPI
             if (print_all_ranks) {
-                printf("[Rank %d] %-22s %15s %10.2f %10.3f %10.0f",
+                printf("[Rank %d] %-38s %14s %10.2f %10.3f %10.0f",
                        rank, test->name, test->category, bandwidth, time_sec * 1000,
                        (double)bytes_per_iter / (1024 * 1024));
             } else {
-                printf("%-22s %15s %10.2f %10.3f %10.0f %10.2f",
+                printf("%-38s %14s %10.2f %10.3f %10.0f %10.2f",
                        test->name, test->category, bandwidth, time_sec * 1000,
                        (double)bytes_per_iter / (1024 * 1024), total_bw);
             }
 #else
-            printf("%-22s %15s %10.2f %10.3f %10.0f",
+            printf("%-38s %14s %10.2f %10.3f %10.0f",
                    test->name, test->category, bandwidth, time_sec * 1000,
                    (double)bytes_per_iter / (1024 * 1024));
 #endif
@@ -1623,7 +1623,7 @@ int main(int argc, char *argv[]) {
 #endif
     
     if (rank == 0) {
-        printf("============================================================\n");
+        printf("================================================================================\n");
     }
     
     free(a);
