@@ -39,7 +39,7 @@ static void sve_gather_ld1w_ld1w(void *a, void *b, void *c, uint64_t size, doubl
     float *dst = (float *)a;
     int32_t *idx_base = gather_indices;
     uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t chunk_bytes = vl * 4 * sizeof(int32_t);
+    uint64_t chunk_bytes = vl * 4 * sizeof(float);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / (vl * 4);
     if (idx_pool_iters < 1) idx_pool_iters = 1;
@@ -356,7 +356,7 @@ static void sve_gather_idx_only(void *a, void *b, void *c, uint64_t size, double
     float *src = (float *)b;
     int32_t *idx_base = gather_indices;
     uint64_t vl = svcntb() / sizeof(int32_t);
-    uint64_t chunk_bytes = vl * 4 * sizeof(int32_t);
+    uint64_t chunk_bytes = vl * 4 * sizeof(float);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / (vl * 4);
     if (idx_pool_iters < 1) idx_pool_iters = 1;
@@ -832,7 +832,7 @@ static test_item_t test_registry[] = {
     {"SVE Gather IdxOnly (No-Store)",        "GatherVar",    sve_gather_idx_only},
     {"SVE Gather Vec+Idx (No-Store)",        "GatherVar",    sve_gather_vec_idx},
     {"SVE Gather Vec+Idx+FMLA (No-Store)",   "GatherVar",    sve_gather_vec_idx_fmla},
-    {"SVE Gather Idx+Store",                 "GatherVar",    sve_gather_idx_store},
+    {"SVE Gather Idx+Store (Baseline)",      "GatherVar",    sve_gather_idx_store},
     {"SVE Gather Vec+Idx+Store",             "GatherVar",    sve_gather_vec_idx_store},
     {"SVE Gather Vec+Idx+FMLA+Store",        "GatherVar",    sve_gather_vec_idx_fmla_store},
 };
