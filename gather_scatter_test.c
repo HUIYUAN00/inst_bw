@@ -674,6 +674,35 @@ static inline uint64_t calc_idx_pos(uint64_t i, uint64_t chunk, uint64_t pool_it
     return (i / chunk % pool_iters) * chunk + i % chunk;
 }
 
+static int verify_gather_fmla_simple(void *dst_ptr, void *src_ptr, void *vec_x_ptr) {
+    int32_t *indices = gather_indices;
+    int errors = 0;
+    uint64_t vl = svcntb() / sizeof(int32_t);
+    uint64_t chunk = vl * 4;
+    uint64_t pool_iters = index_pool_size / chunk;
+    if (pool_iters < 1) pool_iters = 1;
+    uint64_t total = buffer_size / sizeof(float);
+    
+    float *src = (float *)src_ptr;
+    float *dst = (float *)dst_ptr;
+    float *vec_x = (float *)vec_x_ptr;
+    
+    for (uint64_t i = 0; i < total && errors < 5; i++) {
+        uint64_t idx_pos = calc_idx_pos(i, chunk, pool_iters);
+        if (idx_pos >= index_pool_size) continue;
+        int32_t elem_idx = indices[idx_pos];
+        
+        float expected = vec_x[i] + vec_x[i] * src[elem_idx];
+        if (dst[i] != expected) {
+            if (errors == 0) fprintf(stderr, "FMLA verify FAILED:\n");
+            fprintf(stderr, "  dst[%lu]: expected %.1f (vec_x[%lu=%.1f]+vec_x*src[%d=%.1f]), got %.1f\n",
+                    i, expected, i, vec_x[i], elem_idx, src[elem_idx], dst[i]);
+            errors++;
+        }
+    }
+    return errors;
+}
+
 static int verify_gather(void *dst_ptr, void *src_ptr, int is_double) {
     int32_t *indices = gather_indices;
     int errors = 0;
@@ -1181,6 +1210,8 @@ int main(int argc, char *argv[]) {
             verify_result = verify_gather_scatter(a, b, 1);
         } else if (test->func == sve_gather_idx_store || test->func == sve_gather_vec_idx_store) {
             verify_result = verify_gather(a, b, 0);
+        } else if (test->func == sve_gather_vec_idx_fmla_store) {
+            verify_result = verify_gather_fmla_simple(a, b, c);
         }
         
 #ifdef USE_MPI
