@@ -473,12 +473,12 @@ static int verify_gather_scatter(void *dst_ptr, void *src_ptr, int is_double) {
 //=== TEST_REGISTRY
 
 static test_item_t test_registry[] = {
-    {"SVE Gather LD1W",           "Gather",        sve_gather_ld1w_ld1w},
-    {"SVE Gather LD1SW+LD1D",     "Gather",        sve_gather_ld1sw_ld1d},
-    {"SVE Scatter ST1W",          "Scatter",       sve_scatter_st1w},
-    {"SVE Scatter ST1D",          "Scatter",       sve_scatter_st1d},
-    {"SVE Gather+Scatter W",      "GatherScatter", sve_gather_scatter_w},
-    {"SVE Gather+Scatter D",      "GatherScatter", sve_gather_scatter_d},
+    {"SVE Gather LD1W (Seq-Store)",     "Gather",        sve_gather_ld1w_ld1w},
+    {"SVE Gather LD1SW+LD1D (Seq-Store)", "Gather",        sve_gather_ld1sw_ld1d},
+    {"SVE Scatter ST1W (Idx-Store)",    "Scatter",       sve_scatter_st1w},
+    {"SVE Scatter ST1D (Idx-Store)",    "Scatter",       sve_scatter_st1d},
+    {"SVE Gather+Scatter W (Idx-Store)", "GatherScatter", sve_gather_scatter_w},
+    {"SVE Gather+Scatter D (Idx-Store)", "GatherScatter", sve_gather_scatter_d},
 };
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);

@@ -122,12 +122,23 @@ mpirun --mca btl ^openib --mca mtl ^ofi -np 4 ./gather_scatter_test_mpi 0 2 4
 
 | 索引 | 测试名称 | 类别 | 说明 |
 |------|----------|------|------|
-| 0 | SVE Gather LD1W | Gather | 使用 LD1W 指令按索引从随机地址加载 32 位数据，顺序存储 |
-| 1 | SVE Gather LD1SW+LD1D | Gather | 使用 LD1SW 加载有符号 32 位扩展到 64 位，配合 LD1D 收集数据 |
-| 2 | SVE Scatter ST1W | Scatter | 顺序加载 32 位数据，使用 ST1W 按索引分散存储到随机地址 |
-| 3 | SVE Scatter ST1D | Scatter | 顺序加载 64 位数据，使用 ST1D 分散存储，配合 LD1SW 加载索引 |
-| 4 | SVE Gather+Scatter W | GatherScatter | 完全非连续：使用相同索引池进行 LD1W 收集 + ST1W 分散 (32 位) |
-| 5 | SVE Gather+Scatter D | GatherScatter | 完全非连续：使用相同索引池进行 LD1D 收集 + ST1D 分散 (64 位) |
+| 0 | SVE Gather LD1W (Seq-Store) | Gather | 随机地址加载(LD1W) → **顺序存储** |
+| 1 | SVE Gather LD1SW+LD1D (Seq-Store) | Gather | 随机地址加载(LD1SW→LD1D) → **顺序存储** |
+| 2 | SVE Scatter ST1W (Idx-Store) | Scatter | 顺序加载 → **索引分散存储** (随机地址) |
+| 3 | SVE Scatter ST1D (Idx-Store) | Scatter | 顺序加载 → **索引分散存储** (随机地址) |
+| 4 | SVE Gather+Scatter W (Idx-Store) | GatherScatter | 随机加载 → **索引分散存储** (完全非连续) |
+| 5 | SVE Gather+Scatter D (Idx-Store) | GatherScatter | 随机加载 → **索引分散存储** (完全非连续) |
+
+### Store 特性分类
+
+| 特性 | 测试项 | 说明 |
+|------|--------|------|
+| **顺序存储 (Seq-Store)** | Gather (0, 1) | dst地址连续递增，硬件预取友好 |
+| **索引存储 (Idx-Store)** | Scatter (2, 3), Gather+Scatter (4, 5) | 使用索引向量作为dst地址，真实Scatter语义 |
+
+**关键区别**：
+- **Seq-Store**: `st1w [dst, #offset]` - 固定偏移，顺序写入
+- **Idx-Store**: `st1w [dst, z_idx.s]` - 向量索引，随机写入
 
 **注意**：Gather+Scatter 测试使用相同的索引池，语义为 `dst[idx[i]] = src[idx[i]]`
 
@@ -345,6 +356,42 @@ mov x17, #0                // 重置计数器（初始为0触发重置）
     b.ne 1b                // 继续循环
 ```
 
+### Store 特性详解
+
+Gather/Scatter 测试的关键区别在于 **Store 操作类型**：
+
+#### 顺序存储 (Seq-Store) - Gather 测试
+
+```asm
+// Gather 测试的 Store 指令（顺序存储）
+st1w z0.s, p0, [dst, #0, MUL VL]  // dst + 0*VL
+st1w z1.s, p0, [dst, #1, MUL VL]  // dst + 1*VL
+st1w z2.s, p0, [dst, #2, MUL VL]  // dst + 2*VL
+st1w z3.s, p0, [dst, #3, MUL VL]  // dst + 3*VL
+add dst, dst, chunk_bytes         // dst指针递增
+```
+
+**特点**：
+- dst 地址连续递增（固定偏移 #0, #1, #2, #3）
+- 硬件预取器可预测访问模式
+- 不是真实的 Scatter 语义（仅 Load 是 Gather）
+
+#### 索引存储 (Idx-Store) - Scatter/GatherScatter 测试
+
+```asm
+// Scatter/GatherScatter 测试的 Store 指令（索引存储）
+ld1w z8.s, p0/z, [idx_ptr, #0, MUL VL]  // 加载索引向量
+st1w z0.s, p0, [dst, z8.s, sxtw 2]      // 使用向量索引作为地址
+```
+
+**特点**：
+- dst 地址由向量索引决定（`z8.s`），完全随机
+- 真实的 Scatter 语义（非连续写入）
+- 硬件预取器无法预测
+- 受索引模式影响：
+  - **Mode 0-2**: 随机索引 → 缓存冲突、预取失效
+  - **Mode 3**: 升序索引 → 缓存预取友好
+
 ### ld1sw 指令优化
 
 在 64 位操作中使用 `ld1sw` 替代 `ld1w + sunpklo`：
@@ -375,11 +422,22 @@ mov x17, #0                // 重置计数器（初始为0触发重置）
 
 ### 索引模式对比 (16MB buffer, 1% sparsity)
 
-| 模式 | Unique% | GB/s (Scatter ST1W) | 说明 |
-|------|---------|---------------------|------|
-| Random (0) | 99.55% | 4.29 | 真实随机访问性能 |
-| Uniform (1) | 100% | 3.20 | 均匀分布，无冲突 |
-| Hotspot (2) | 96.74% | 8.86 | 热点缓存命中率高 |
+| 模式 | Unique% | Scatter ST1W GB/s | Gather LD1W GB/s | 说明 |
+|------|---------|-------------------|------------------|------|
+| Random (0) | 99.55% | 4.52 | 4.59 | 真实随机访问性能 |
+| Uniform (1) | 100% | ~3.2 | ~3.2 | 均匀分布，无冲突 |
+| Hotspot (2) | 96.74% | 6.73 | 9.20 | 热点缓存命中率高（Load收益更大） |
+| RandomUniqueSorted (3) | 100% | 4.82 | 3.81 | 升序优化Idx-Store预取 |
+
+**关键观察**：
+- **Gather测试（Seq-Store）**：
+  - Mode 2 (Hotspot) 带宽最高：Load热点缓存命中率高
+  - Mode 0 vs Mode 3 差异小：Store是顺序的，不受索引影响
+- **Scatter测试（Idx-Store）**：
+  - Mode 3 (RandomUniqueSorted) > Mode 0：升序索引提升预取效率
+  - Mode 2 (Hotspot) > Mode 0：热点区域缓存命中率高
+  - **索引模式显著影响带宽**
+- **GatherScatter测试（Idx-Store）**：完全非连续访问，带宽最低
 | RandomUniqueSorted (3) | 100% | 3.35 | 升序访问，缓存预取友好 |
 
 **关键观察**：
