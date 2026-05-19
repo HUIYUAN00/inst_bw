@@ -18,6 +18,7 @@ static int index_mode = 0;
 static int print_all_ranks = 0;
 static uint64_t index_pool_size = 0;
 static int32_t *gather_indices = NULL;
+static unsigned int random_seed = 42;
 
 typedef struct {
     const char *name;
@@ -1219,6 +1220,7 @@ static void print_usage(const char *prog_name) {
     printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 1.0)\n");
     printf("  -m, --index-mode <N>    Index generation mode (default: 0)\n");
     printf("                           0: Random, 1: Uniform, 2: RandomUniqueSorted\n");
+    printf("  -r, --random-seed <N>   Random seed for index generation (default: 42)\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
@@ -1358,6 +1360,12 @@ int main(int argc, char *argv[]) {
             }
             continue;
         }
+        if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--random-seed") == 0) {
+            if (i + 1 < argc) {
+                random_seed = (unsigned int)atoi(argv[++i]);
+            }
+            continue;
+        }
         if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--warmup") == 0) {
             if (i + 1 < argc) {
                 warmup_iter = atoi(argv[++i]);
@@ -1389,6 +1397,7 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
 #endif
     
     buffer_size = (buffer_size / 1024) * 1024;
@@ -1419,7 +1428,7 @@ int main(int argc, char *argv[]) {
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
         printf("Registered Tests: %d\n", test_count);
-        printf("Random Seed: %d (fixed)\n", 42);
+        printf("Random Seed: %u\n", random_seed);
         printf("\n");
     }
     
@@ -1446,7 +1455,7 @@ int main(int argc, char *argv[]) {
         dc[i] = 3.0;
     }
     
-    srand(42);
+    srand(random_seed);
     uint64_t max_element_idx_64 = buffer_size / sizeof(int64_t) - 1;
     uint64_t max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
     
