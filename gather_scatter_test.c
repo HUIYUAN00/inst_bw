@@ -13,7 +13,7 @@
 static int warmup_iter = 5;
 static int test_iter = 10;
 static uint64_t buffer_size = 128 * 1024 * 1024;
-static double sparsity = 0.01;
+static double sparsity = 1.0;
 static int index_mode = 0;
 static int print_all_ranks = 0;
 static uint64_t index_pool_size = 0;
@@ -1216,9 +1216,9 @@ static void print_usage(const char *prog_name) {
     printf("  -h, --help              Show this help message\n");
     printf("  -l, --list              List all available tests\n");
     printf("  -b, --buffer-size <MB>  Buffer size in MB (default: 128)\n");
-    printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 0.01)\n");
+    printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 1.0)\n");
     printf("  -m, --index-mode <N>    Index generation mode (default: 0)\n");
-    printf("                           0: Random, 1: Uniform, 2: Hotspot, 3: RandomUniqueSorted\n");
+    printf("                           0: Random, 1: Uniform, 2: RandomUniqueSorted\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
@@ -1231,7 +1231,6 @@ static void print_usage(const char *prog_name) {
     printf("  %s                               Run all tests (default)\n", prog_name);
     printf("  %s -b 64 -s 0.02                 64MB buffer, 2%% sparsity\n", prog_name);
     printf("  %s -s 1.0 -m 1                   Full range, uniform indices\n", prog_name);
-    printf("  %s -s 0.5 -m 2                    50%% sparsity, hotspot pattern\n", prog_name);
     printf("  %s Gather                        Run all Gather tests\n", prog_name);
     printf("  %s 0 2                           Run tests 0 and 2\n", prog_name);
 }
@@ -1355,7 +1354,7 @@ int main(int argc, char *argv[]) {
             if (i + 1 < argc) {
                 index_mode = atoi(argv[++i]);
                 if (index_mode < 0) index_mode = 0;
-                if (index_mode > 3) index_mode = 3;
+                if (index_mode > 2) index_mode = 2;
             }
             continue;
         }
@@ -1453,7 +1452,7 @@ int main(int argc, char *argv[]) {
     uint64_t coverage_buckets = (max_idx / 64) + 2;
     uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
     
-    const char *mode_names[] = {"Random", "Uniform", "Hotspot", "RandomUniqueSorted"};
+    const char *mode_names[] = {"Random", "Uniform", "RandomUniqueSorted"};
     
     if (index_mode == 0) {
         for (uint64_t i = 0; i < index_pool_size; i++) {
@@ -1464,21 +1463,9 @@ int main(int argc, char *argv[]) {
     } else if (index_mode == 1) {
         uint64_t stride = (max_idx + 1) / index_pool_size;
         if (stride == 0) stride = 1;
-        uint64_t remainder = (max_idx + 1) - stride * index_pool_size;
         for (uint64_t i = 0; i < index_pool_size; i++) {
-            uint64_t base = i * stride + (i < remainder ? i : remainder);
-            uint64_t idx = base + (((uint64_t)rand() << 32 | rand()) % stride);
+            uint64_t idx = i * stride;
             if (idx > max_idx) idx = max_idx;
-            gather_indices[i] = (int32_t)idx;
-            update_index_stats(idx, &min_idx, &max_found, coverage);
-        }
-    } else if (index_mode == 2) {
-        uint64_t hotspot_size = (max_idx + 1) / 10;
-        uint64_t hotspot_start = (uint64_t)rand() % (max_idx + 1 - hotspot_size);
-        for (uint64_t i = 0; i < index_pool_size; i++) {
-            uint64_t idx = (rand() % 100 < 80) ? 
-                hotspot_start + ((uint64_t)rand() % hotspot_size) :
-                ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
             gather_indices[i] = (int32_t)idx;
             update_index_stats(idx, &min_idx, &max_found, coverage);
         }
