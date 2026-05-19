@@ -1418,7 +1418,9 @@ int main(int argc, char *argv[]) {
         printf("Index Pool Size: %lu elements\n", index_pool_size);
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
-        printf("Registered Tests: %d\n\n", test_count);
+        printf("Registered Tests: %d\n", test_count);
+        printf("Random Seed: %d (fixed)\n", 42);
+        printf("\n");
     }
     
     void *a = NULL, *b = NULL, *c = NULL;
