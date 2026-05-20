@@ -1557,7 +1557,7 @@ int main(int argc, char *argv[]) {
                 fprintf(fp, "#\n");
                 for (uint64_t i = 0; i < index_pool_size; i++) {
                     int32_t idx = gather_indices[i];
-                    fprintf(fp, "%d\t%lu\t%lu\n", idx, (uint64_t)idx * 4, (uint64_t)idx * 8);
+                    fprintf(fp, "%10d %15lu %15lu\n", idx, (uint64_t)idx * 4, (uint64_t)idx * 8);
                 }
                 fclose(fp);
                 printf("Indices written to: %s\n", output_indices_file);
