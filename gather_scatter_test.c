@@ -19,6 +19,7 @@ static int print_all_ranks = 0;
 static uint64_t index_pool_size = 0;
 static int32_t *gather_indices = NULL;
 static unsigned int random_seed = 42;
+static const char *output_indices_file = NULL;
 
 typedef struct {
     const char *name;
@@ -1224,6 +1225,7 @@ static void print_usage(const char *prog_name) {
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
+    printf("  -o, --output-indices <file>  Output gather indices to file\n");
     printf("\nTest Specification:\n");
     printf("  <index>                 Run test by index (0-based)\n");
     printf("  <name>                  Run test by name (partial match)\n");
@@ -1382,6 +1384,12 @@ int main(int argc, char *argv[]) {
             print_all_ranks = 1;
             continue;
         }
+        if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output-indices") == 0) {
+            if (i + 1 < argc) {
+                output_indices_file = argv[++i];
+            }
+            continue;
+        }
         run_all = 0;
         num_specs++;
     }
@@ -1533,6 +1541,28 @@ int main(int argc, char *argv[]) {
                (double)covered / index_pool_size * 100.0);
         printf("Coverage: %.4f%% of buffer\n\n", 
                (double)covered / (max_idx + 1) * 100.0);
+        
+        if (output_indices_file) {
+            FILE *fp = fopen(output_indices_file, "w");
+            if (fp) {
+                fprintf(fp, "# Gather Indices Output\n");
+                fprintf(fp, "# Index Mode: %s\n", mode_names[index_mode]);
+                fprintf(fp, "# Random Seed: %u\n", random_seed);
+                fprintf(fp, "# Sparsity: %.4f\n", sparsity);
+                fprintf(fp, "# Index Pool Size: %lu\n", index_pool_size);
+                fprintf(fp, "# Max Index: %lu\n", max_idx);
+                fprintf(fp, "# Generated Range: [%lu, %lu]\n", min_idx, max_found);
+                fprintf(fp, "# Unique Indices: %lu\n", covered);
+                fprintf(fp, "#\n");
+                for (uint64_t i = 0; i < index_pool_size; i++) {
+                    fprintf(fp, "%d\n", gather_indices[i]);
+                }
+                fclose(fp);
+                printf("Indices written to: %s\n", output_indices_file);
+            } else {
+                fprintf(stderr, "Failed to open output file: %s\n", output_indices_file);
+            }
+        }
     }
     
     if (rank == 0) {
