@@ -76,8 +76,6 @@ static void spmv_csr_sve(void *result_ptr, void *values_ptr, void *vector_ptr, u
     double *vec = (double *)vector_ptr;
     double *y = (double *)result_ptr;
     
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
-    
     for (uint64_t i = 0; i < matrix_size; i++) {
         uint64_t row_start = row_ptr[i];
         uint64_t row_nnz = row_ptr[i + 1] - row_start;
@@ -87,11 +85,39 @@ static void spmv_csr_sve(void *result_ptr, void *values_ptr, void *vector_ptr, u
             continue;
         }
         
-        double sum = 0.0;
-        for (uint64_t j = 0; j < row_nnz; j++) {
-            sum += val[row_start + j] * vec[col_idx[row_start + j]];
-        }
-        y[i] = sum;
+        __asm__ volatile (
+            "mov x0, %[row_nnz]\n"
+            "mov x1, #0\n"
+            "fmov d4, xzr\n"
+            "cntd x2\n"
+            
+            "1:\n"
+            "sub x3, x0, x1\n"
+            "cmp x3, x2\n"
+            "csel x4, x3, x2, lt\n"
+            
+            "whilelt p1.d, xzr, x4\n"
+            "mov z3.d, #0\n"
+            "ld1sw z0.d, p1/z, [%[col_ptr], x1, lsl #2]\n"
+            "ld1d z1.d, p1/z, [%[val_ptr], x1, lsl #3]\n"
+            "ld1d z2.d, p1/z, [%[vec_ptr], z0.d, lsl #3]\n"
+            "fmla z3.d, p1/m, z1.d, z2.d\n"
+            "faddv d0, p1, z3.d\n"
+            "fadd d4, d4, d0\n"
+            
+            "add x1, x1, x4\n"
+            "cmp x1, x0\n"
+            "blt 1b\n"
+            
+            "str d4, [%[y_ptr]]\n"
+            :
+            : [row_nnz] "r" (row_nnz),
+              [col_ptr] "r" (&col_idx[row_start]),
+              [val_ptr] "r" (&val[row_start]),
+              [vec_ptr] "r" (vec),
+              [y_ptr] "r" (&y[i])
+            : "x0", "x1", "x2", "x3", "x4", "p1", "z0", "z1", "z2", "z3", "d0", "d4", "memory", "cc"
+        );
     }
 }
 
