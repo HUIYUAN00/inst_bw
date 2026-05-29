@@ -16,6 +16,7 @@ static int test_iter = 10;
 static uint64_t matrix_size = 1024;
 static double sparsity = 0.01;
 static int print_all_ranks = 0;
+static int print_indices = 0;
 static uint64_t nnz_count = 0;
 static uint64_t *row_ptr = NULL;
 static int32_t *col_idx = NULL;
@@ -39,6 +40,18 @@ static int compare_int32(const void *a, const void *b) {
     int32_t ia = *(const int32_t *)a;
     int32_t ib = *(const int32_t *)b;
     return (ia < ib) ? -1 : (ia > ib) ? 1 : 0;
+}
+
+typedef struct {
+    uint32_t row;
+    uint32_t col;
+} sparse_coord_t;
+
+static int compare_coord(const void *a, const void *b) {
+    const sparse_coord_t *ca = (const sparse_coord_t *)a;
+    const sparse_coord_t *cb = (const sparse_coord_t *)b;
+    if (ca->row != cb->row) return (ca->row < cb->row) ? -1 : 1;
+    return (ca->col < cb->col) ? -1 : (ca->col > cb->col) ? 1 : 0;
 }
 
 #pragma GCC push_options
@@ -101,9 +114,58 @@ static void print_usage(const char *prog_name) {
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
+    printf("  -i, --print-indices     Print sparse matrix indices\n");
     printf("\nExamples:\n");
     printf("  %s                             1024x1024 matrix, 1%% sparsity\n", prog_name);
     printf("  %s -M 4096 -s 0.001            4096x4096 matrix, 0.1%% sparsity\n", prog_name);
+}
+
+static void print_indices_to_file(sparse_coord_t *coords, uint64_t nnz_count, uint64_t matrix_size, 
+                                   uint64_t *row_ptr, int32_t *col_idx, double *values, double sparsity) {
+    char filename[256];
+    snprintf(filename, sizeof(filename), "sparse_matrix_%lu_%04f.txt", matrix_size, sparsity);
+    
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "Failed to open file %s for writing\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "================================================================================\n");
+    fprintf(fp, "Sparse Matrix Configuration\n");
+    fprintf(fp, "================================================================================\n");
+    fprintf(fp, "Matrix Size: %lu x %lu\n", matrix_size, matrix_size);
+    fprintf(fp, "Sparsity: %.4f (%.2f%%)\n", sparsity, sparsity * 100);
+    fprintf(fp, "Non-zero Elements (NNZ): %lu\n", nnz_count);
+    fprintf(fp, "================================================================================\n\n");
+    
+    fprintf(fp, "Sparse Matrix Indices (Row-Major Order):\n");
+    fprintf(fp, "================================================================================\n");
+    fprintf(fp, "%-8s %-8s %-8s %-12s\n", "Index", "Row", "Col", "Value");
+    fprintf(fp, "================================================================================\n");
+    for (uint64_t i = 0; i < nnz_count; i++) {
+        fprintf(fp, "%-8lu %-8u %-8u %-12.6f\n", i, coords[i].row, coords[i].col, values[i]);
+    }
+    fprintf(fp, "================================================================================\n\n");
+    
+    fprintf(fp, "CSR Format:\n");
+    fprintf(fp, "================================================================================\n");
+    fprintf(fp, "row_ptr[%lu]:\n", matrix_size + 1);
+    for (uint64_t i = 0; i <= matrix_size; i++) {
+        fprintf(fp, "%lu ", row_ptr[i]);
+    }
+    fprintf(fp, "\n\ncol_idx[%lu]:\n", nnz_count);
+    for (uint64_t i = 0; i < nnz_count; i++) {
+        fprintf(fp, "%d ", col_idx[i]);
+    }
+    fprintf(fp, "\n\nvalues[%lu]:\n", nnz_count);
+    for (uint64_t i = 0; i < nnz_count; i++) {
+        fprintf(fp, "%.6f ", values[i]);
+    }
+    fprintf(fp, "\n================================================================================\n");
+    
+    fclose(fp);
+    printf("Indices written to file: %s\n", filename);
 }
 
 static void print_tests(void) {
@@ -235,6 +297,10 @@ int main(int argc, char *argv[]) {
             print_all_ranks = 1;
             continue;
         }
+        if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--print-indices") == 0) {
+            print_indices = 1;
+            continue;
+        }
         run_all = 0;
         num_specs++;
     }
@@ -302,53 +368,62 @@ int main(int argc, char *argv[]) {
         vector[i] = (double)rand() / RAND_MAX;
     }
     
-    uint64_t nnz_per_row = nnz_count / matrix_size;
-    if (nnz_per_row < 1) nnz_per_row = 1;
+    sparse_coord_t *coords = (sparse_coord_t *)malloc(nnz_count * sizeof(sparse_coord_t));
+    uint64_t *coverage = (uint64_t *)calloc(((matrix_size * matrix_size) / 64) + 2, sizeof(uint64_t));
+    uint64_t unique_count = 0;
+    uint64_t max_elements = matrix_size * matrix_size;
+    int attempts = 0;
+    int max_attempts = nnz_count * 20;
+    
+    while (unique_count < nnz_count && attempts < max_attempts) {
+        uint64_t rand_val = ((uint64_t)rand() << 32) | (uint64_t)rand();
+        uint64_t idx = rand_val % max_elements;
+        uint64_t bucket = idx / 64;
+        uint64_t bit = idx % 64;
+        if (!(coverage[bucket] & (1ULL << bit))) {
+            coverage[bucket] |= (1ULL << bit);
+            coords[unique_count].row = (uint32_t)(idx / matrix_size);
+            coords[unique_count].col = (uint32_t)(idx % matrix_size);
+            unique_count++;
+        }
+        attempts++;
+    }
+    
+    for (uint64_t i = 0; i < max_elements && unique_count < nnz_count; i++) {
+        uint64_t bucket = i / 64;
+        uint64_t bit = i % 64;
+        if (!(coverage[bucket] & (1ULL << bit))) {
+            coverage[bucket] |= (1ULL << bit);
+            coords[unique_count].row = (uint32_t)(i / matrix_size);
+            coords[unique_count].col = (uint32_t)(i % matrix_size);
+            unique_count++;
+        }
+    }
+    
+    free(coverage);
+    
+    qsort(coords, nnz_count, sizeof(sparse_coord_t), compare_coord);
     
     row_ptr[0] = 0;
-    uint64_t pos = 0;
+    uint64_t current_row = 0;
     
-    for (uint64_t i = 0; i < matrix_size; i++) {
-        uint64_t row_nnz = nnz_per_row;
-        if (i == matrix_size - 1) {
-            row_nnz = nnz_count - pos;
+    for (uint64_t i = 0; i < nnz_count; i++) {
+        col_idx[i] = (int32_t)coords[i].col;
+        while (current_row < coords[i].row) {
+            row_ptr[current_row + 1] = i;
+            current_row++;
         }
-        if (row_nnz > matrix_size) row_nnz = matrix_size;
-        
-        row_ptr[i + 1] = row_ptr[i] + row_nnz;
-        
-        uint64_t *coverage = (uint64_t *)calloc((matrix_size / 64) + 2, sizeof(uint64_t));
-        uint64_t unique_count = 0;
-        int attempts = 0;
-        int max_attempts = row_nnz * 20;
-        
-        while (unique_count < row_nnz && attempts < max_attempts) {
-            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % matrix_size;
-            uint64_t bucket = idx / 64;
-            uint64_t bit = idx % 64;
-            if (!(coverage[bucket] & (1ULL << bit))) {
-                coverage[bucket] |= (1ULL << bit);
-                col_idx[pos + unique_count] = (int32_t)idx;
-                unique_count++;
-            }
-            attempts++;
-        }
-        
-        for (uint64_t j = 0; j < matrix_size && unique_count < row_nnz; j++) {
-            uint64_t bucket = j / 64;
-            uint64_t bit = j % 64;
-            if (!(coverage[bucket] & (1ULL << bit))) {
-                coverage[bucket] |= (1ULL << bit);
-                col_idx[pos + unique_count] = (int32_t)j;
-                unique_count++;
-            }
-        }
-        
-        qsort(&col_idx[pos], row_nnz, sizeof(int32_t), compare_int32);
-        
-        free(coverage);
-        pos += row_nnz;
     }
+    while (current_row < matrix_size) {
+        row_ptr[current_row + 1] = nnz_count;
+        current_row++;
+    }
+    
+    if (print_indices && rank == 0) {
+        print_indices_to_file(coords, nnz_count, matrix_size, row_ptr, col_idx, values, sparsity);
+    }
+    
+    free(coords);
     
     spmv_csr_scalar(result_ref, values, vector, nnz_count, 1.0);
     
