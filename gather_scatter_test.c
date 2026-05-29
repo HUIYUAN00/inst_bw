@@ -1484,8 +1484,9 @@ int main(int argc, char *argv[]) {
     if (index_modulo == 0) index_modulo = max_idx + 1;
     if (index_modulo > max_idx + 1) index_modulo = max_idx + 1;
     
-    uint64_t min_idx = max_idx, max_found = 0;
-    uint64_t coverage_buckets = (max_idx / 64) + 2;
+    uint64_t actual_range = (index_mode == 2) ? index_modulo : max_idx + 1;
+    uint64_t min_idx = actual_range, max_found = 0;
+    uint64_t coverage_buckets = (actual_range / 64) + 2;
     uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
     
     const char *mode_names[] = {"Random", "Uniform", "RandomUniqueSorted"};
@@ -1546,7 +1547,8 @@ int main(int argc, char *argv[]) {
     }
     
     uint64_t covered = 0;
-    for (uint64_t i = 0; i < coverage_buckets - 1; i++) {
+    uint64_t coverage_limit = (actual_range / 64) + 1;
+    for (uint64_t i = 0; i < coverage_limit; i++) {
         covered += __builtin_popcountll(coverage[i]);
     }
     free(coverage);
