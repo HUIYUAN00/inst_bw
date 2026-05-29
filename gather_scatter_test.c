@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include <arm_sve.h>
 
 #ifdef USE_MPI
@@ -20,6 +21,7 @@ static uint64_t index_pool_size = 0;
 static int32_t *gather_indices = NULL;
 static unsigned int random_seed = 42;
 static const char *output_indices_file = NULL;
+static uint64_t index_modulo = 0;
 
 typedef struct {
     const char *name;
@@ -1221,6 +1223,8 @@ static void print_usage(const char *prog_name) {
     printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 1.0)\n");
     printf("  -m, --index-mode <N>    Index generation mode (default: 0)\n");
     printf("                           0: Random, 1: Uniform, 2: RandomUniqueSorted\n");
+    printf("  -M, --modulo <N>        Index modulo for RandomUniqueSorted mode (default: sqrt(max_idx))\n");
+    printf("                           Limits index range to [0, modulo-1]\n");
     printf("  -r, --random-seed <N>   Random seed for index generation (default: 42)\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
@@ -1362,6 +1366,12 @@ int main(int argc, char *argv[]) {
             }
             continue;
         }
+        if (strcmp(argv[i], "-M") == 0 || strcmp(argv[i], "--modulo") == 0) {
+            if (i + 1 < argc) {
+                index_modulo = (uint64_t)atol(argv[++i]);
+            }
+            continue;
+        }
         if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--random-seed") == 0) {
             if (i + 1 < argc) {
                 random_seed = (unsigned int)atoi(argv[++i]);
@@ -1406,6 +1416,7 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&index_modulo, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
 #endif
     
     buffer_size = (buffer_size / 1024) * 1024;
@@ -1467,6 +1478,12 @@ int main(int argc, char *argv[]) {
     uint64_t max_element_idx_64 = buffer_size / sizeof(int64_t) - 1;
     uint64_t max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
     
+    if (index_mode == 2 && index_modulo == 0) {
+        index_modulo = (uint64_t)sqrt((double)max_idx);
+    }
+    if (index_modulo == 0) index_modulo = max_idx + 1;
+    if (index_modulo > max_idx + 1) index_modulo = max_idx + 1;
+    
     uint64_t min_idx = max_idx, max_found = 0;
     uint64_t coverage_buckets = (max_idx / 64) + 2;
     uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
@@ -1489,14 +1506,15 @@ int main(int argc, char *argv[]) {
             update_index_stats(idx, &min_idx, &max_found, coverage);
         }
     } else {
-        uint64_t max_unique = (max_idx + 1 < index_pool_size) ? max_idx + 1 : index_pool_size;
+        uint64_t modulo_range = index_modulo;
+        uint64_t max_unique = (modulo_range < index_pool_size) ? modulo_range : index_pool_size;
         uint64_t *unique_indices = (uint64_t *)malloc(max_unique * sizeof(uint64_t));
         uint64_t unique_count = 0;
         int attempts = 0;
         int max_attempts = index_pool_size * 20;
         
         while (unique_count < max_unique && attempts < max_attempts) {
-            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
+            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % modulo_range;
             uint64_t bucket = idx / 64;
             uint64_t bit = idx % 64;
             if (!(coverage[bucket] & (1ULL << bit))) {
@@ -1508,7 +1526,7 @@ int main(int argc, char *argv[]) {
             attempts++;
         }
         
-        for (uint64_t i = 0; i <= max_idx && unique_count < max_unique; i++) {
+        for (uint64_t i = 0; i < modulo_range && unique_count < max_unique; i++) {
             uint64_t bucket = i / 64;
             uint64_t bit = i % 64;
             if (!(coverage[bucket] & (1ULL << bit))) {
@@ -1535,6 +1553,9 @@ int main(int argc, char *argv[]) {
     
     if (rank == 0) {
         printf("Index Mode: %s\n", mode_names[index_mode]);
+        if (index_mode == 2) {
+            printf("Index Modulo: %lu (sqrt=%.2f)\n", index_modulo, sqrt((double)max_idx));
+        }
         printf("Max Index: %lu (buffer elements: %lu)\n", max_idx, max_element_idx_64);
         printf("Generated Range: [%lu, %lu]\n", min_idx, max_found);
         printf("Unique Indices: %lu / %lu (%.2f%%)\n", covered, index_pool_size, 
@@ -1547,6 +1568,9 @@ int main(int argc, char *argv[]) {
             if (fp) {
                 fprintf(fp, "# Gather Indices Output\n");
                 fprintf(fp, "# Index Mode: %s\n", mode_names[index_mode]);
+                if (index_mode == 2) {
+                    fprintf(fp, "# Index Modulo: %lu\n", index_modulo);
+                }
                 fprintf(fp, "# Random Seed: %u\n", random_seed);
                 fprintf(fp, "# Sparsity: %.4f\n", sparsity);
                 fprintf(fp, "# Index Pool Size: %lu\n", index_pool_size);
