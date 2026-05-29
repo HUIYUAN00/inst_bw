@@ -1484,9 +1484,8 @@ int main(int argc, char *argv[]) {
     if (index_modulo == 0) index_modulo = max_idx + 1;
     if (index_modulo > max_idx + 1) index_modulo = max_idx + 1;
     
-    uint64_t actual_range = (index_mode == 2) ? index_modulo : max_idx + 1;
-    uint64_t min_idx = actual_range, max_found = 0;
-    uint64_t coverage_buckets = (actual_range / 64) + 2;
+    uint64_t min_idx = max_idx, max_found = 0;
+    uint64_t coverage_buckets = (max_idx / 64) + 2;
     uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
     
     const char *mode_names[] = {"Random", "Uniform", "RandomUniqueSorted"};
@@ -1507,15 +1506,14 @@ int main(int argc, char *argv[]) {
             update_index_stats(idx, &min_idx, &max_found, coverage);
         }
     } else {
-        uint64_t modulo_range = index_modulo;
-        uint64_t max_unique = (modulo_range < index_pool_size) ? modulo_range : index_pool_size;
+        uint64_t max_unique = (max_idx + 1 < index_pool_size) ? max_idx + 1 : index_pool_size;
         uint64_t *unique_indices = (uint64_t *)malloc(max_unique * sizeof(uint64_t));
         uint64_t unique_count = 0;
         int attempts = 0;
         int max_attempts = index_pool_size * 20;
         
         while (unique_count < max_unique && attempts < max_attempts) {
-            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % modulo_range;
+            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
             uint64_t bucket = idx / 64;
             uint64_t bit = idx % 64;
             if (!(coverage[bucket] & (1ULL << bit))) {
@@ -1527,7 +1525,7 @@ int main(int argc, char *argv[]) {
             attempts++;
         }
         
-        for (uint64_t i = 0; i < modulo_range && unique_count < max_unique; i++) {
+        for (uint64_t i = 0; i <= max_idx && unique_count < max_unique; i++) {
             uint64_t bucket = i / 64;
             uint64_t bit = i % 64;
             if (!(coverage[bucket] & (1ULL << bit))) {
@@ -1541,26 +1539,44 @@ int main(int argc, char *argv[]) {
         qsort(unique_indices, unique_count, sizeof(uint64_t), compare_uint64);
         index_pool_size = unique_count;
         for (uint64_t i = 0; i < unique_count; i++) {
-            gather_indices[i] = (int32_t)unique_indices[i];
+            uint64_t idx = unique_indices[i];
+            if (index_modulo < max_idx + 1) {
+                idx = idx % index_modulo;
+            }
+            gather_indices[i] = (int32_t)idx;
         }
         free(unique_indices);
     }
     
     uint64_t covered = 0;
-    uint64_t coverage_limit = (actual_range / 64) + 1;
-    for (uint64_t i = 0; i < coverage_limit; i++) {
+    for (uint64_t i = 0; i < coverage_buckets - 1; i++) {
         covered += __builtin_popcountll(coverage[i]);
     }
     free(coverage);
     
+    uint64_t modulo_covered = 0;
+    if (index_mode == 2 && index_modulo < max_idx + 1) {
+        uint64_t *modulo_coverage = (uint64_t *)calloc((index_modulo / 64) + 2, sizeof(uint64_t));
+        for (uint64_t i = 0; i < index_pool_size; i++) {
+            uint64_t idx = gather_indices[i];
+            modulo_coverage[idx / 64] |= (1ULL << (idx % 64));
+        }
+        for (uint64_t i = 0; i < (index_modulo / 64) + 1; i++) {
+            modulo_covered += __builtin_popcountll(modulo_coverage[i]);
+        }
+        free(modulo_coverage);
+    }
+    
     if (rank == 0) {
         printf("Index Mode: %s\n", mode_names[index_mode]);
-        if (index_mode == 2) {
+        if (index_mode == 2 && index_modulo < max_idx + 1) {
             printf("Index Modulo: %lu (sqrt=%.2f)\n", index_modulo, sqrt((double)max_idx));
+            printf("Modulo Coverage: %lu / %lu (%.2f%%) of [0, %lu]\n", 
+                   modulo_covered, index_modulo, (double)modulo_covered / index_modulo * 100.0, index_modulo - 1);
         }
         printf("Max Index: %lu (buffer elements: %lu)\n", max_idx, max_element_idx_64);
-        printf("Generated Range: [%lu, %lu]\n", min_idx, max_found);
-        printf("Unique Indices: %lu / %lu (%.2f%%)\n", covered, index_pool_size, 
+        printf("Generated Range (pre-modulo): [%lu, %lu]\n", min_idx, max_found);
+        printf("Unique Indices (pre-modulo): %lu / %lu (%.2f%%)\n", covered, index_pool_size, 
                (double)covered / index_pool_size * 100.0);
         printf("Coverage: %.4f%% of buffer\n\n", 
                (double)covered / (max_idx + 1) * 100.0);
@@ -1570,15 +1586,20 @@ int main(int argc, char *argv[]) {
             if (fp) {
                 fprintf(fp, "# Gather Indices Output\n");
                 fprintf(fp, "# Index Mode: %s\n", mode_names[index_mode]);
-                if (index_mode == 2) {
-                    fprintf(fp, "# Index Modulo: %lu\n", index_modulo);
+                if (index_mode == 2 && index_modulo < max_idx + 1) {
+                    fprintf(fp, "# Index Modulo: %lu (applied after sort)\n", index_modulo);
+                    fprintf(fp, "# Modulo Coverage: [0, %lu]\n", index_modulo - 1);
                 }
                 fprintf(fp, "# Random Seed: %u\n", random_seed);
                 fprintf(fp, "# Sparsity: %.4f\n", sparsity);
                 fprintf(fp, "# Index Pool Size: %lu\n", index_pool_size);
                 fprintf(fp, "# Max Index: %lu\n", max_idx);
-                fprintf(fp, "# Generated Range: [%lu, %lu]\n", min_idx, max_found);
-                fprintf(fp, "# Unique Indices: %lu\n", covered);
+                fprintf(fp, "# Generated Range (pre-modulo): [%lu, %lu]\n", min_idx, max_found);
+                fprintf(fp, "# Unique Indices (pre-modulo): %lu\n", covered);
+                if (index_mode == 2 && index_modulo < max_idx + 1) {
+                    fprintf(fp, "# Modulo Coverage: %lu / %lu (%.2f%%)\n", 
+                            modulo_covered, index_modulo, (double)modulo_covered / index_modulo * 100.0);
+                }
                 fprintf(fp, "# Format: Index | Float_Offset(bytes) | Double_Offset(bytes)\n");
                 fprintf(fp, "#\n");
                 for (uint64_t i = 0; i < index_pool_size; i++) {
