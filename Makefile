@@ -1,6 +1,7 @@
 CC = gcc
 MPICC = mpicc
 CFLAGS = -O3 -march=armv8-a+sve -mtune=native -Wall
+LDFLAGS = -lm
 MPI_CFLAGS = $(CFLAGS) -DUSE_MPI
 OMP_CFLAGS = $(CFLAGS) -fopenmp
 
@@ -13,10 +14,10 @@ sve_bw_test_mpi: sve_bw_test.c
 	$(MPICC) $(MPI_CFLAGS) -o $@ $<
 
 gather_scatter_test: gather_scatter_test.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
 gather_scatter_test_mpi: gather_scatter_test.c
-	$(MPICC) $(MPI_CFLAGS) -o $@ $<
+	$(MPICC) $(MPI_CFLAGS) $(LDFLAGS) -o $@ $<
 
 stream_omp_test: stream_omp_test.c
 	$(CC) $(OMP_CFLAGS) -o $@ $<
