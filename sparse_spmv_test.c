@@ -15,15 +15,24 @@ static int warmup_iter = 5;
 static int test_iter = 10;
 static uint64_t matrix_size = 1024;
 static double sparsity = 0.01;
+static int print_all_ranks = 0;
 static uint64_t nnz_count = 0;
-static int32_t *col_indices = NULL;
-static double *matrix_values = NULL;
+static uint64_t *row_ptr = NULL;
+static int32_t *col_idx = NULL;
+static double *values = NULL;
 static double *vector = NULL;
 static double *result = NULL;
+static double *result_ref = NULL;
 static unsigned int random_seed = 42;
 
-static inline double get_bandwidth(uint64_t bytes, double time_sec) {
-    return bytes / time_sec / 1e9;
+typedef struct {
+    const char *name;
+    const char *category;
+    void (*func)(void *result, void *values, void *vector, uint64_t size, double scalar);
+} test_item_t;
+
+static inline double get_mflops(uint64_t flops, double time_sec) {
+    return (double)flops / time_sec / 1e6;
 }
 
 static int compare_int32(const void *a, const void *b) {
@@ -35,55 +44,52 @@ static int compare_int32(const void *a, const void *b) {
 #pragma GCC push_options
 #pragma GCC optimize ("O3")
 
-static void spmv_sve_gather(void *result_ptr, void *matrix_ptr, void *vector_ptr, uint64_t size, double scalar) {
-    double *matrix = (double *)matrix_ptr;
+static void spmv_csr_scalar(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, double scalar) {
+    double *val = (double *)values_ptr;
     double *vec = (double *)vector_ptr;
-    double *dst = (double *)result_ptr;
-    int32_t *idx_base = col_indices;
+    double *y = (double *)result_ptr;
     
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
-    uint64_t iterations = nnz_count / vl_d;
-    if (iterations == 0) iterations = 1;
-    
-    __asm__ volatile (
-        "mov x16, %[iter]\n"
-        "mov x17, %[idx]\n"
-        "mov x18, %[mat]\n"
-        "mov x19, %[vec]\n"
-        "mov x20, %[dst]\n"
-        "mov x21, #0\n"
-        "1:\n"
-        "ptrue p0.d\n"
-        "ld1sw z4.d, p0/z, [x17, x21, lsl 2]\n"
-        "ld1d z0.d, p0/z, [x18, x21, lsl 3]\n"
-        "ld1d z1.d, p0/z, [x19, z4.d, lsl 3]\n"
-        "fmla z2.d, p0/m, z0.d, z1.d\n"
-        "add x21, x21, %[vl]\n"
-        "subs x16, x16, #1\n"
-        "b.ne 1b\n"
-        "st1d z2.d, p0, [x20]\n"
-        :
-        : [iter] "r" (iterations), [idx] "r" (idx_base), [mat] "r" (matrix), 
-          [vec] "r" (vec), [dst] "r" (dst), [vl] "r" (vl_d)
-        : "x16", "x17", "x18", "x19", "x20", "x21", "p0",
-          "z0", "z1", "z2", "z4", "memory"
-    );
+    for (uint64_t i = 0; i < matrix_size; i++) {
+        double sum = 0.0;
+        for (uint64_t j = row_ptr[i]; j < row_ptr[i + 1]; j++) {
+            sum += val[j] * vec[col_idx[j]];
+        }
+        y[i] = sum;
+    }
 }
 
-static void spmv_scalar(void *result_ptr, void *matrix_ptr, void *vector_ptr, uint64_t size, double scalar) {
-    double *matrix = (double *)matrix_ptr;
+static void spmv_csr_sve(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, double scalar) {
+    double *val = (double *)values_ptr;
     double *vec = (double *)vector_ptr;
-    double *dst = (double *)result_ptr;
-    int32_t *idx = col_indices;
+    double *y = (double *)result_ptr;
     
-    double sum = 0.0;
-    for (uint64_t i = 0; i < nnz_count; i++) {
-        sum += matrix[i] * vec[idx[i]];
+    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    
+    for (uint64_t i = 0; i < matrix_size; i++) {
+        uint64_t row_start = row_ptr[i];
+        uint64_t row_nnz = row_ptr[i + 1] - row_start;
+        
+        if (row_nnz == 0) {
+            y[i] = 0.0;
+            continue;
+        }
+        
+        double sum = 0.0;
+        for (uint64_t j = 0; j < row_nnz; j++) {
+            sum += val[row_start + j] * vec[col_idx[row_start + j]];
+        }
+        y[i] = sum;
     }
-    *dst = sum;
 }
 
 #pragma GCC pop_options
+
+static test_item_t test_registry[] = {
+    {"CSR Scalar SpMV",          "SpMV",       spmv_csr_scalar},
+    {"CSR SVE Intrin SpMV",      "SpMV",       spmv_csr_sve},
+};
+
+static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);
 
 static void print_usage(const char *prog_name) {
     printf("Usage: %s [options]\n", prog_name);
@@ -94,50 +100,85 @@ static void print_usage(const char *prog_name) {
     printf("  -r, --random-seed <N>   Random seed (default: 42)\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
+    printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
     printf("\nExamples:\n");
     printf("  %s                             1024x1024 matrix, 1%% sparsity\n", prog_name);
     printf("  %s -M 4096 -s 0.001            4096x4096 matrix, 0.1%% sparsity\n", prog_name);
 }
 
-static int verify_spmv(void *result_ptr, void *matrix_ptr, void *vector_ptr) {
-    double *matrix = (double *)matrix_ptr;
-    double *vec = (double *)vector_ptr;
-    double *dst = (double *)result_ptr;
-    int32_t *idx = col_indices;
-    
-    double expected = 0.0;
-    for (uint64_t i = 0; i < nnz_count; i++) {
-        expected += matrix[i] * vec[idx[i]];
+static void print_tests(void) {
+    printf("Available Tests:\n");
+    printf("================================================================================\n");
+    printf("%-4s %-38s %14s\n", "Idx", "Test Name", "Category");
+    printf("================================================================================\n");
+    for (int i = 0; i < test_count; i++) {
+        printf("%-4d %-38s %14s\n", i, test_registry[i].name, test_registry[i].category);
     }
+    printf("================================================================================\n");
+}
+
+static int should_run_test(int test_idx, int num_specs, char **specs) {
+    if (num_specs == 0) return 1;
     
-    if (fabs(*dst - expected) > 1e-6) {
-        fprintf(stderr, "SPMV verify FAILED: expected %.6f, got %.6f\n", expected, *dst);
-        return 1;
+    test_item_t *test = &test_registry[test_idx];
+    
+    for (int i = 0; i < num_specs; i++) {
+        char *spec = specs[i];
+        
+        char *endptr;
+        long idx = strtol(spec, &endptr, 10);
+        if (*endptr == '\0' && idx >= 0 && idx < test_count) {
+            if (idx == test_idx) return 1;
+            continue;
+        }
+        
+        if (strcmp(spec, test->name) == 0) return 1;
+        if (strcmp(spec, test->category) == 0) return 1;
+        if (strstr(test->name, spec) != NULL) return 1;
     }
     return 0;
 }
 
-static double run_test(void (*func)(void*, void*, void*, uint64_t, double), void *result, void *matrix, void *vector) {
+static int verify_spmv(void *result_ptr, void *ref_ptr) {
+    double *y = (double *)result_ptr;
+    double *y_ref = (double *)ref_ptr;
+    int errors = 0;
+    
+    for (uint64_t i = 0; i < matrix_size && errors < 5; i++) {
+        if (fabs(y[i] - y_ref[i]) > 1e-9) {
+            if (errors == 0) fprintf(stderr, "SpMV verify FAILED:\n");
+            fprintf(stderr, "  result[%lu]: expected %.6f, got %.6f\n", i, y_ref[i], y[i]);
+            errors++;
+        }
+    }
+    return errors;
+}
+
+static double run_test(test_item_t *test, void *result, void *values, void *vector
+#ifdef USE_MPI
+    , MPI_Comm comm
+#endif
+) {
     struct timespec start, end;
     
 #ifdef USE_MPI
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(comm);
 #endif
     
     for (int i = 0; i < warmup_iter; i++) {
-        func(result, matrix, vector, nnz_count, 1.0);
+        test->func(result, values, vector, nnz_count, 1.0);
     }
     
 #ifdef USE_MPI
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(comm);
 #endif
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (int i = 0; i < test_iter; i++) {
-        func(result, matrix, vector, nnz_count, 1.0);
+        test->func(result, values, vector, nnz_count, 1.0);
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
 #ifdef USE_MPI
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(comm);
 #endif
     
     double time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
@@ -154,6 +195,10 @@ int main(int argc, char *argv[]) {
     int rank = 0;
 #endif
     
+    int run_all = 1;
+    int num_specs = 0;
+    char **specs = NULL;
+    
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             if (rank == 0) print_usage(argv[0]);
@@ -167,9 +212,11 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--sparsity") == 0) {
-            if (i + 1 < argc) sparsity = atof(argv[++i]);
-            if (sparsity <= 0.0) sparsity = 0.01;
-            if (sparsity > 1.0) sparsity = 1.0;
+            if (i + 1 < argc) {
+                sparsity = atof(argv[++i]);
+                if (sparsity <= 0.0) sparsity = 0.01;
+                if (sparsity > 1.0) sparsity = 1.0;
+            }
             continue;
         }
         if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--random-seed") == 0) {
@@ -184,43 +231,58 @@ int main(int argc, char *argv[]) {
             if (i + 1 < argc) test_iter = atoi(argv[++i]);
             continue;
         }
+        if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--print-all") == 0) {
+            print_all_ranks = 1;
+            continue;
+        }
+        run_all = 0;
+        num_specs++;
+    }
+    
+    if (!run_all && num_specs > 0) {
+        specs = &argv[argc - num_specs];
     }
     
 #ifdef USE_MPI
     MPI_Bcast(&matrix_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
     MPI_Bcast(&sparsity, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
     MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
     
     nnz_count = (uint64_t)(matrix_size * matrix_size * sparsity);
-    if (nnz_count < 1) nnz_count = 1;
+    if (nnz_count < matrix_size) nnz_count = matrix_size;
     
     uint64_t vl = svcntb();
     
     if (rank == 0) {
         printf("================================================================================\n");
 #ifdef USE_MPI
-        printf("Sparse SpMV Benchmark (MPI - %d processes)\n", nprocs);
+        printf("CSR SpMV Benchmark (MPI - %d processes)\n", nprocs);
 #else
-        printf("Sparse SpMV Benchmark\n");
+        printf("CSR SpMV Benchmark\n");
 #endif
         printf("================================================================================\n");
         printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
         printf("Matrix Size: %lu x %lu\n", matrix_size, matrix_size);
         printf("Sparsity: %.4f (%.2f%%)\n", sparsity, sparsity * 100);
         printf("Non-zero Elements (NNZ): %lu\n", nnz_count);
+        printf("Avg NNZ per Row: %.2f\n", (double)nnz_count / matrix_size);
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
         printf("Random Seed: %u\n", random_seed);
+        printf("Registered Tests: %d\n", test_count);
         printf("\n");
     }
     
-    if (posix_memalign((void**)&matrix_values, 64, nnz_count * sizeof(double)) != 0 ||
-        posix_memalign((void**)&col_indices, 64, nnz_count * sizeof(int32_t)) != 0 ||
+    if (posix_memalign((void**)&row_ptr, 64, (matrix_size + 1) * sizeof(uint64_t)) != 0 ||
+        posix_memalign((void**)&col_idx, 64, nnz_count * sizeof(int32_t)) != 0 ||
+        posix_memalign((void**)&values, 64, nnz_count * sizeof(double)) != 0 ||
         posix_memalign((void**)&vector, 64, matrix_size * sizeof(double)) != 0 ||
-        posix_memalign((void**)&result, 64, sizeof(double)) != 0) {
+        posix_memalign((void**)&result, 64, matrix_size * sizeof(double)) != 0 ||
+        posix_memalign((void**)&result_ref, 64, matrix_size * sizeof(double)) != 0) {
 #ifdef USE_MPI
         fprintf(stderr, "[Rank %d] Failed to allocate aligned memory\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
@@ -233,89 +295,134 @@ int main(int argc, char *argv[]) {
     srand(random_seed);
     
     for (uint64_t i = 0; i < nnz_count; i++) {
-        matrix_values[i] = (double)rand() / RAND_MAX;
+        values[i] = (double)rand() / RAND_MAX;
     }
     
     for (uint64_t i = 0; i < matrix_size; i++) {
         vector[i] = (double)rand() / RAND_MAX;
     }
     
-    uint64_t *coverage = (uint64_t *)calloc((matrix_size / 64) + 2, sizeof(uint64_t));
-    uint64_t unique_count = 0;
-    int attempts = 0;
-    int max_attempts = nnz_count * 20;
+    uint64_t nnz_per_row = nnz_count / matrix_size;
+    if (nnz_per_row < 1) nnz_per_row = 1;
     
-    while (unique_count < nnz_count && attempts < max_attempts) {
-        uint64_t idx = ((uint64_t)rand() << 32 | rand()) % matrix_size;
-        uint64_t bucket = idx / 64;
-        uint64_t bit = idx % 64;
-        if (!(coverage[bucket] & (1ULL << bit))) {
-            coverage[bucket] |= (1ULL << bit);
-            col_indices[unique_count++] = (int32_t)idx;
+    row_ptr[0] = 0;
+    uint64_t pos = 0;
+    
+    for (uint64_t i = 0; i < matrix_size; i++) {
+        uint64_t row_nnz = nnz_per_row;
+        if (i == matrix_size - 1) {
+            row_nnz = nnz_count - pos;
         }
-        attempts++;
-    }
-    
-    for (uint64_t i = 0; i < matrix_size && unique_count < nnz_count; i++) {
-        uint64_t bucket = i / 64;
-        uint64_t bit = i % 64;
-        if (!(coverage[bucket] & (1ULL << bit))) {
-            coverage[bucket] |= (1ULL << bit);
-            col_indices[unique_count++] = (int32_t)i;
+        if (row_nnz > matrix_size) row_nnz = matrix_size;
+        
+        row_ptr[i + 1] = row_ptr[i] + row_nnz;
+        
+        uint64_t *coverage = (uint64_t *)calloc((matrix_size / 64) + 2, sizeof(uint64_t));
+        uint64_t unique_count = 0;
+        int attempts = 0;
+        int max_attempts = row_nnz * 20;
+        
+        while (unique_count < row_nnz && attempts < max_attempts) {
+            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % matrix_size;
+            uint64_t bucket = idx / 64;
+            uint64_t bit = idx % 64;
+            if (!(coverage[bucket] & (1ULL << bit))) {
+                coverage[bucket] |= (1ULL << bit);
+                col_idx[pos + unique_count] = (int32_t)idx;
+                unique_count++;
+            }
+            attempts++;
         }
+        
+        for (uint64_t j = 0; j < matrix_size && unique_count < row_nnz; j++) {
+            uint64_t bucket = j / 64;
+            uint64_t bit = j % 64;
+            if (!(coverage[bucket] & (1ULL << bit))) {
+                coverage[bucket] |= (1ULL << bit);
+                col_idx[pos + unique_count] = (int32_t)j;
+                unique_count++;
+            }
+        }
+        
+        qsort(&col_idx[pos], row_nnz, sizeof(int32_t), compare_int32);
+        
+        free(coverage);
+        pos += row_nnz;
     }
     
-    qsort(col_indices, nnz_count, sizeof(int32_t), compare_int32);
-    
-    for (uint64_t i = 0; i < nnz_count; i++) {
-        col_indices[i] = col_indices[i] % matrix_size;
-    }
-    
-    free(coverage);
+    spmv_csr_scalar(result_ref, values, vector, nnz_count, 1.0);
     
     if (rank == 0) {
-        printf("%-38s %12s %12s %12s\n", "Test", "Time(ms)", "GFLOPS", "GB/s");
+#ifdef USE_MPI
+        printf("%-38s %14s %12s %12s %12s\n", 
+               "Test", "Category", "MFLOPS", "Time(ms)", "Total(MFLOPS)");
+#else
+        printf("%-38s %14s %12s %12s\n", 
+               "Test", "Category", "MFLOPS", "Time(ms)");
+#endif
         printf("================================================================================\n");
     }
     
-    double time_sec = run_test(spmv_sve_gather, result, matrix_values, vector);
-    uint64_t flops = nnz_count * 2;
-    uint64_t bytes = nnz_count * sizeof(double) + nnz_count * sizeof(int32_t) + nnz_count * sizeof(double);
-    double gflops = (double)flops / time_sec / 1e9;
-    double bandwidth = get_bandwidth(bytes, time_sec);
-    
-    int verify_result = verify_spmv(result, matrix_values, vector);
-    
-    if (rank == 0) {
-        printf("%-38s %12.3f %12.2f %12.2f", "SVE Gather SpMV", time_sec * 1000, gflops, bandwidth);
-        if (verify_result == 0) {
-            printf("  PASS\n");
-        } else {
-            printf("  FAIL\n");
+    for (int i = 0; i < test_count; i++) {
+        if (!run_all && !should_run_test(i, num_specs, specs)) continue;
+        
+        test_item_t *test = &test_registry[i];
+        uint64_t flops = nnz_count * 2;
+        
+#ifdef USE_MPI
+        double time_sec = run_test(test, result, values, vector, MPI_COMM_WORLD);
+#else
+        double time_sec = run_test(test, result, values, vector);
+#endif
+        double mflops = get_mflops(flops, time_sec);
+        
+#ifdef USE_MPI
+        double total_mflops = 0.0;
+        MPI_Reduce(&mflops, &total_mflops, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+#endif
+        
+        int verify_result = verify_spmv(result, result_ref);
+        
+#ifdef USE_MPI
+        MPI_Barrier(MPI_COMM_WORLD);
+#endif
+        
+        if (rank == 0 || print_all_ranks) {
+#ifdef USE_MPI
+            if (print_all_ranks) {
+                printf("[Rank %d] %-38s %14s %12.2f %12.3f",
+                       rank, test->name, test->category, mflops, time_sec * 1000);
+            } else {
+                printf("%-38s %14s %12.2f %12.3f %12.2f",
+                       test->name, test->category, mflops, time_sec * 1000, total_mflops);
+            }
+#else
+            printf("%-38s %14s %12.2f %12.3f",
+                   test->name, test->category, mflops, time_sec * 1000);
+#endif
+            if (verify_result > 0) {
+                printf("  VERIFY_FAIL(%d)", verify_result);
+            } else if (verify_result == 0) {
+                printf("  PASS");
+            }
+            printf("\n");
         }
     }
     
-    memset(result, 0, sizeof(double));
-    time_sec = run_test(spmv_scalar, result, matrix_values, vector);
-    gflops = (double)flops / time_sec / 1e9;
-    bandwidth = get_bandwidth(bytes, time_sec);
-    
-    verify_result = verify_spmv(result, matrix_values, vector);
+#ifdef USE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
     
     if (rank == 0) {
-        printf("%-38s %12.3f %12.2f %12.2f", "Scalar SpMV", time_sec * 1000, gflops, bandwidth);
-        if (verify_result == 0) {
-            printf("  PASS\n");
-        } else {
-            printf("  FAIL\n");
-        }
         printf("================================================================================\n");
     }
     
-    free(matrix_values);
-    free(col_indices);
+    free(row_ptr);
+    free(col_idx);
+    free(values);
     free(vector);
     free(result);
+    free(result_ref);
     
 #ifdef USE_MPI
     MPI_Finalize();
