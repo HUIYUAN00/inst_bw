@@ -169,37 +169,79 @@ static void spmv_csr_complex_neon(void *result_ptr, void *values_ptr, void *vect
             "mov x2, %[val_ptr]\n"
             "eor v4.16b, v4.16b, v4.16b\n"
             
-            "asr x3, x0, #1\n"
-            "and x4, x0, #1\n"
+            "asr x3, x0, #2\n"
+            "and x4, x0, #3\n"
             
             "cmp x3, #0\n"
             "beq 2f\n"
             
             "1:\n"
             "ldp w5, w6, [x1], #8\n"
+            "ldp w7, w8, [x1], #8\n"
             "ldr q0, [x2], #16\n"
             "ldr q1, [x2], #16\n"
-            "ldr q2, [%[vec_ptr], x5, lsl #4]\n"
-            "ldr q3, [%[vec_ptr], x6, lsl #4]\n"
-            "fcmla v4.2d, v0.2d, v2.2d, #0\n"
-            "fcmla v4.2d, v0.2d, v2.2d, #90\n"
-            "fcmla v4.2d, v1.2d, v3.2d, #0\n"
-            "fcmla v4.2d, v1.2d, v3.2d, #90\n"
+            "ldr q2, [x2], #16\n"
+            "ldr q3, [x2], #16\n"
+            "ldr q16, [%[vec_ptr], x5, lsl #4]\n"
+            "ldr q17, [%[vec_ptr], x6, lsl #4]\n"
+            "ldr q18, [%[vec_ptr], x7, lsl #4]\n"
+            "ldr q19, [%[vec_ptr], x8, lsl #4]\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #0\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #90\n"
+            "fcmla v4.2d, v1.2d, v17.2d, #0\n"
+            "fcmla v4.2d, v1.2d, v17.2d, #90\n"
+            "fcmla v4.2d, v2.2d, v18.2d, #0\n"
+            "fcmla v4.2d, v2.2d, v18.2d, #90\n"
+            "fcmla v4.2d, v3.2d, v19.2d, #0\n"
+            "fcmla v4.2d, v3.2d, v19.2d, #90\n"
             
             "subs x3, x3, #1\n"
             "bne 1b\n"
             
             "2:\n"
             "cmp x4, #0\n"
-            "beq 3f\n"
+            "beq 6f\n"
             
+            "cmp x4, #1\n"
+            "bne 3f\n"
             "ldr w5, [x1], #4\n"
             "ldr q0, [x2], #16\n"
-            "ldr q2, [%[vec_ptr], x5, lsl #4]\n"
-            "fcmla v4.2d, v0.2d, v2.2d, #0\n"
-            "fcmla v4.2d, v0.2d, v2.2d, #90\n"
+            "ldr q16, [%[vec_ptr], x5, lsl #4]\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #0\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #90\n"
+            "b 6f\n"
             
             "3:\n"
+            "cmp x4, #2\n"
+            "bne 4f\n"
+            "ldp w5, w6, [x1], #8\n"
+            "ldr q0, [x2], #16\n"
+            "ldr q1, [x2], #16\n"
+            "ldr q16, [%[vec_ptr], x5, lsl #4]\n"
+            "ldr q17, [%[vec_ptr], x6, lsl #4]\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #0\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #90\n"
+            "fcmla v4.2d, v1.2d, v17.2d, #0\n"
+            "fcmla v4.2d, v1.2d, v17.2d, #90\n"
+            "b 6f\n"
+            
+            "4:\n"
+            "ldp w5, w6, [x1], #8\n"
+            "ldr w7, [x1], #4\n"
+            "ldr q0, [x2], #16\n"
+            "ldr q1, [x2], #16\n"
+            "ldr q2, [x2], #16\n"
+            "ldr q16, [%[vec_ptr], x5, lsl #4]\n"
+            "ldr q17, [%[vec_ptr], x6, lsl #4]\n"
+            "ldr q18, [%[vec_ptr], x7, lsl #4]\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #0\n"
+            "fcmla v4.2d, v0.2d, v16.2d, #90\n"
+            "fcmla v4.2d, v1.2d, v17.2d, #0\n"
+            "fcmla v4.2d, v1.2d, v17.2d, #90\n"
+            "fcmla v4.2d, v2.2d, v18.2d, #0\n"
+            "fcmla v4.2d, v2.2d, v18.2d, #90\n"
+            
+            "6:\n"
             "str q4, [%[y_ptr]]\n"
             :
             : [row_nnz] "r" (row_nnz),
@@ -207,7 +249,8 @@ static void spmv_csr_complex_neon(void *result_ptr, void *values_ptr, void *vect
               [val_ptr] "r" (&val[row_start]),
               [vec_ptr] "r" (vec),
               [y_ptr] "r" (&y[i])
-            : "x0", "x1", "x2", "x3", "x4", "w5", "w6", "v0", "v1", "v2", "v3", "v4", "memory", "cc"
+            : "x0", "x1", "x2", "x3", "x4", "w5", "w6", "w7", "w8", 
+              "v0", "v1", "v2", "v3", "v4", "v16", "v17", "v18", "v19", "memory", "cc"
         );
     }
 }
