@@ -179,6 +179,8 @@ static void spmv_csr_complex_neon(void *result_ptr, void *values_ptr, void *vect
             "beq 2f\n"
             
             "1:\n"
+            "prfm pldl1keep, [x1, #256]\n"
+            "prfm pldl2keep, [x1, #4096]\n"
             "prfm pldl1keep, [x2, #256]\n"
             "prfm pldl2keep, [x2, #4096]\n"
             "ldp w5, w6, [x1], #8\n"
