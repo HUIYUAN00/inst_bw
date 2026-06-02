@@ -655,7 +655,7 @@ int main(int argc, char *argv[]) {
         void *res_ptr, *val_ptr, *vec_ptr, *ref_ptr;
         
         if (strcmp(test->category, "Complex") == 0) {
-            flops = nnz_count * 8;
+            flops = (nnz_count * 2 + matrix_size * 2) * 4;
             res_ptr = result_complex;
             val_ptr = values_complex;
             vec_ptr = vector_complex;
