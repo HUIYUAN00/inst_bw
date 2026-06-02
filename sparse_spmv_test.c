@@ -136,15 +136,27 @@ static void spmv_csr_complex_scalar(void *result_ptr, void *values_ptr, void *ve
     complex_double_t *vec = (complex_double_t *)vector_ptr;
     complex_double_t *y = (complex_double_t *)result_ptr;
     
+    static int printed = 0;
+    
     for (uint64_t i = 0; i < matrix_size; i++) {
         complex_double_t sum = {0.0, 0.0};
         for (uint64_t j = row_ptr[i]; j < row_ptr[i + 1]; j++) {
             complex_double_t v = val[j];
             complex_double_t x = vec[col_idx[j]];
+            
+            if (print_indices && !printed) {
+                printf("  Row %lu, j=%lu: col_idx[j]=%d, vec[col_idx[j]] address=%p\n", 
+                       i, j, col_idx[j], (void*)&vec[col_idx[j]]);
+            }
+            
             sum.re += v.re * x.re - v.im * x.im;
             sum.im += v.re * x.im + v.im * x.re;
         }
         y[i] = sum;
+    }
+    
+    if (print_indices && !printed) {
+        printed = 1;
     }
 }
 
