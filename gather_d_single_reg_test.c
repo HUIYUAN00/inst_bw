@@ -7,9 +7,17 @@
 #include <math.h>
 #include <arm_sve.h>
 
+#ifdef USE_MPI
+#include <mpi.h>
+#endif
+
+static int warmup_iter = 5;
+static int test_iter = 10;
 static uint64_t buffer_size = 128 * 1024 * 1024;
 static uint64_t index_pool_size = 0;
 static int32_t *gather_indices = NULL;
+static unsigned int random_seed = 42;
+static int print_all_ranks = 0;
 
 #pragma GCC push_options
 #pragma GCC optimize ("O3")
@@ -367,27 +375,88 @@ static inline double get_bandwidth(uint64_t bytes, double time_sec) {
     return bytes / time_sec / 1e9;
 }
 
-static double run_test(test_item_t *test, void *a, void *b, void *c) {
+static double run_test(test_item_t *test, void *a, void *b, void *c
+#ifdef USE_MPI
+    , MPI_Comm comm
+#endif
+) {
     struct timespec start, end;
     double scalar = 2.0;
-    int warmup_iter = 5;
-    int test_iter = 10;
+    
+#ifdef USE_MPI
+    MPI_Barrier(comm);
+#endif
     
     for (int i = 0; i < warmup_iter; i++) {
         test->func(a, b, c, buffer_size, scalar);
     }
     
+#ifdef USE_MPI
+    MPI_Barrier(comm);
+#endif
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (int i = 0; i < test_iter; i++) {
         test->func(a, b, c, buffer_size, scalar);
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
+#ifdef USE_MPI
+    MPI_Barrier(comm);
+#endif
     
     double time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     return time_sec / test_iter;
 }
 
 int main(int argc, char *argv[]) {
+#ifdef USE_MPI
+    MPI_Init(&argc, &argv);
+    
+    int rank, nprocs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+#else
+    int rank = 0;
+#endif
+    
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--buffer-size") == 0) {
+            if (i + 1 < argc) {
+                buffer_size = (uint64_t)atoi(argv[++i]) * 1024 * 1024;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--warmup") == 0) {
+            if (i + 1 < argc) {
+                warmup_iter = atoi(argv[++i]);
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--test") == 0) {
+            if (i + 1 < argc) {
+                test_iter = atoi(argv[++i]);
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--random-seed") == 0) {
+            if (i + 1 < argc) {
+                random_seed = (unsigned int)atoi(argv[++i]);
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--print-all") == 0) {
+            print_all_ranks = 1;
+            continue;
+        }
+    }
+    
+#ifdef USE_MPI
+    MPI_Bcast(&buffer_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
+#endif
+    
     uint64_t vl = svcntb();
     uint64_t vl_d = vl / sizeof(int64_t);
     
@@ -401,15 +470,24 @@ int main(int argc, char *argv[]) {
     uint64_t min_indices = vl_d * 2;
     if (index_pool_size < min_indices) index_pool_size = min_indices;
     
-    printf("================================================================================\n");
-    printf("SVE Gather D Single-Register Bandwidth Test\n");
-    printf("================================================================================\n");
-    printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
-    printf("VL (double): %lu elements\n", vl_d);
-    printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
-    printf("Index Pool Size: %lu elements\n", index_pool_size);
-    printf("Registered Tests: %d\n", test_count);
-    printf("\n");
+    if (rank == 0) {
+        printf("================================================================================\n");
+#ifdef USE_MPI
+        printf("SVE Gather D Single-Register Bandwidth Test (MPI - %d processes)\n", nprocs);
+#else
+        printf("SVE Gather D Single-Register Bandwidth Test\n");
+#endif
+        printf("================================================================================\n");
+        printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
+        printf("VL (double): %lu elements\n", vl_d);
+        printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
+        printf("Index Pool Size: %lu elements\n", index_pool_size);
+        printf("Warmup Iterations: %d\n", warmup_iter);
+        printf("Test Iterations: %d\n", test_iter);
+        printf("Registered Tests: %d\n", test_count);
+        printf("Random Seed: %u\n", random_seed);
+        printf("\n");
+    }
     
     void *a = NULL, *b = NULL, *c = NULL;
     
@@ -417,7 +495,12 @@ int main(int argc, char *argv[]) {
         posix_memalign(&b, 64, buffer_size) != 0 ||
         posix_memalign(&c, 64, buffer_size) != 0 ||
         posix_memalign((void**)&gather_indices, 64, index_pool_size * sizeof(int32_t)) != 0) {
+#ifdef USE_MPI
+        fprintf(stderr, "[Rank %d] Failed to allocate aligned memory\n", rank);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+#else
         fprintf(stderr, "Failed to allocate aligned memory\n");
+#endif
         return 1;
     }
     
@@ -429,22 +512,38 @@ int main(int argc, char *argv[]) {
         dc[i] = 3.0;
     }
     
-    srand(42);
+    srand(random_seed);
     for (uint64_t i = 0; i < index_pool_size; i++) {
         uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
         gather_indices[i] = (int32_t)idx;
     }
     
-    printf("%-38s %10s %10s %10s %12s\n", 
-           "Test", "GB/s", "Time(ms)", "Data(MB)", "Verify");
-    printf("================================================================================\n");
+    if (rank == 0) {
+#ifdef USE_MPI
+        printf("%-38s %10s %10s %10s %12s %10s\n", 
+               "Test", "GB/s", "Time(ms)", "Data(MB)", "Verify", "Total(GB/s)");
+#else
+        printf("%-38s %10s %10s %10s %12s\n", 
+               "Test", "GB/s", "Time(ms)", "Data(MB)", "Verify");
+#endif
+        printf("================================================================================\n");
+    }
     
     for (int i = 0; i < test_count; i++) {
         test_item_t *test = &test_registry[i];
         uint64_t bytes_per_iter = buffer_size * 2;
         
+#ifdef USE_MPI
+        double time_sec = run_test(test, a, b, c, MPI_COMM_WORLD);
+#else
         double time_sec = run_test(test, a, b, c);
+#endif
         double bandwidth = get_bandwidth(bytes_per_iter, time_sec);
+        
+#ifdef USE_MPI
+        double total_bw = 0.0;
+        MPI_Reduce(&bandwidth, &total_bw, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+#endif
         
         int verify_result = -1;
         if (test->func == sve_gather_d_idx_store_single_reg || 
@@ -454,26 +553,60 @@ int main(int argc, char *argv[]) {
             verify_result = verify_gather_d_fmla_single_reg(a, c, b);
         }
         
-        printf("%-38s %10.2f %10.3f %10.0f",
-               test->name, bandwidth, time_sec * 1000,
-               (double)bytes_per_iter / (1024 * 1024));
+#ifdef USE_MPI
+        MPI_Barrier(MPI_COMM_WORLD);
+#endif
         
-        if (verify_result > 0) {
-            printf("  FAIL(%d)", verify_result);
-        } else if (verify_result == 0) {
-            printf("  PASS");
-        } else {
-            printf("  NO_CHECK");
+        if (rank == 0 || print_all_ranks) {
+#ifdef USE_MPI
+            if (print_all_ranks) {
+                printf("[Rank %d] %-38s %10.2f %10.3f %10.0f",
+                       rank, test->name, bandwidth, time_sec * 1000,
+                       (double)bytes_per_iter / (1024 * 1024));
+            } else {
+                printf("%-38s %10.2f %10.3f %10.0f",
+                       test->name, bandwidth, time_sec * 1000,
+                       (double)bytes_per_iter / (1024 * 1024));
+            }
+#else
+            printf("%-38s %10.2f %10.3f %10.0f",
+                   test->name, bandwidth, time_sec * 1000,
+                   (double)bytes_per_iter / (1024 * 1024));
+#endif
+            
+            if (verify_result > 0) {
+                printf("  FAIL(%d)", verify_result);
+            } else if (verify_result == 0) {
+                printf("  PASS");
+            } else {
+                printf("  NO_CHECK");
+            }
+            
+#ifdef USE_MPI
+            if (!print_all_ranks) {
+                printf(" %10.2f", total_bw);
+            }
+#endif
+            printf("\n");
         }
-        printf("\n");
     }
     
-    printf("================================================================================\n");
+#ifdef USE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+    
+    if (rank == 0) {
+        printf("================================================================================\n");
+    }
     
     free(a);
     free(b);
     free(c);
     free(gather_indices);
+    
+#ifdef USE_MPI
+    MPI_Finalize();
+#endif
     
     return 0;
 }
