@@ -3,4 +3,9 @@ sve_bw_test_mpi
 gather_scatter_test
 gather_scatter_test_mpi
 stream_omp_test
+gather_d_single_reg_test
+sparse_spmv_test
+sparse_spmv_test_mpi
 *.o
+opencode.json
+sparse_matrix*.txt
