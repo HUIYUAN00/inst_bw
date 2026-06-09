@@ -5,7 +5,7 @@ LDFLAGS = -lm
 MPI_CFLAGS = $(CFLAGS) -DUSE_MPI
 OMP_CFLAGS = $(CFLAGS) -fopenmp
 
-all: sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi
+all: sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test
 
 sve_bw_test: sve_bw_test.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -28,8 +28,11 @@ sparse_spmv_test: sparse_spmv_test.c
 sparse_spmv_test_mpi: sparse_spmv_test.c
 	$(MPICC) $(MPI_CFLAGS) $(LDFLAGS) -o $@ $<
 
+gather_d_single_reg_test: gather_d_single_reg_test.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
 clean:
-	rm -f sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi
+	rm -f sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test
 
 run: sve_bw_test_mpi
 	mpirun --allow-run-as-root -np 4 ./sve_bw_test_mpi
@@ -55,4 +58,7 @@ run_spmv: sparse_spmv_test
 run_spmv_mpi: sparse_spmv_test_mpi
 	mpirun --allow-run-as-root -np 4 ./sparse_spmv_test_mpi
 
-.PHONY: all clean run run_single run_gs run_gs_mpi run_stream_omp run_stream_omp_8 run_spmv run_spmv_mpi
+run_gather_d_single: gather_d_single_reg_test
+	./gather_d_single_reg_test
+
+.PHONY: all clean run run_single run_gs run_gs_mpi run_stream_omp run_stream_omp_8 run_spmv run_spmv_mpi run_gather_d_single
