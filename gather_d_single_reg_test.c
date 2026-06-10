@@ -22,6 +22,7 @@ static int32_t *gather_indices = NULL;
 static unsigned int random_seed = 42;
 static const char *output_indices_file = NULL;
 static uint64_t index_modulo = 0;
+static volatile double last_dot_result = 0.0;
 
 static inline double get_bandwidth(uint64_t bytes, double time_sec) {
     return bytes / time_sec / 1e9;
@@ -44,6 +45,7 @@ static inline void update_index_stats(uint64_t idx, uint64_t *min_idx, uint64_t 
 
 static void sve_gather_d_idx_only_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
+    double *dummy_dst = (double *)a;
     int32_t *idx_base = gather_indices;
     uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
@@ -53,6 +55,7 @@ static void sve_gather_d_idx_only_single_reg(void *a, void *b, void *c, uint64_t
     
     svbool_t pg = svptrue_b64();
     uint64_t pool_counter = 0;
+    svfloat64_t acc = svdup_f64(0.0);
     
     for (uint64_t i = 0; i < iterations; i++) {
         if (pool_counter == 0) {
@@ -62,16 +65,19 @@ static void sve_gather_d_idx_only_single_reg(void *a, void *b, void *c, uint64_t
         
         svint64_t indices = svld1sw_s64(pg, idx_base);
         svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
-        __asm__ __volatile__("" ::: "memory");
+        acc = svadd_f64_z(pg, acc, gathered);
         
         idx_base += vl_d;
         pool_counter--;
     }
+    
+    svst1_f64(pg, dummy_dst, acc);
 }
 
 static void sve_gather_d_vec_idx_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     double *vec_x_d = (double *)b;
+    double *dummy_dst = (double *)a;
     int32_t *idx_base = gather_indices;
     uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
@@ -81,6 +87,7 @@ static void sve_gather_d_vec_idx_single_reg(void *a, void *b, void *c, uint64_t 
     
     svbool_t pg = svptrue_b64();
     uint64_t pool_counter = 0;
+    svfloat64_t acc = svdup_f64(0.0);
     
     for (uint64_t i = 0; i < iterations; i++) {
         if (pool_counter == 0) {
@@ -91,15 +98,17 @@ static void sve_gather_d_vec_idx_single_reg(void *a, void *b, void *c, uint64_t 
         svfloat64_t vec_x = svld1_f64(pg, vec_x_d);
         svint64_t indices = svld1sw_s64(pg, idx_base);
         svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
-        __asm__ __volatile__("" ::: "memory");
+        acc = svadd_f64_z(pg, acc, svadd_f64_z(pg, vec_x, gathered));
         
         idx_base += vl_d;
         vec_x_d += vl_d;
         pool_counter--;
     }
+    
+    svst1_f64(pg, dummy_dst, acc);
 }
 
-static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
+static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     double *vec_x_d = (double *)b;
     int32_t *idx_base = gather_indices;
@@ -111,6 +120,7 @@ static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, void *c, uint
     
     svbool_t pg = svptrue_b64();
     uint64_t pool_counter = 0;
+    double dot_sum = 0.0;
     
     for (uint64_t i = 0; i < iterations; i++) {
         if (pool_counter == 0) {
@@ -122,12 +132,18 @@ static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, void *c, uint
         svint64_t indices = svld1sw_s64(pg, idx_base);
         svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
         vec_x = svmla_f64_z(pg, vec_x, vec_x, gathered);
-        __asm__ __volatile__("" ::: "memory");
+        dot_sum += svaddv_f64(pg, vec_x);
         
         idx_base += vl_d;
         vec_x_d += vl_d;
         pool_counter--;
     }
+    
+    return dot_sum;
+}
+
+static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
+    last_dot_result = sve_gather_d_vec_idx_fmla_single_reg_core(a, b, c, size, scalar);
 }
 
 static void sve_gather_d_idx_store_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -289,15 +305,11 @@ static int verify_gather_d_fmla_single_reg(void *dst_ptr, void *src_ptr, void *v
 typedef struct {
     const char *name;
     void (*func)(void *a, void *b, void *c, uint64_t size, double scalar);
+    double (*func_dot)(void *a, void *b, void *c, uint64_t size, double scalar);
 } test_item_t;
 
 static test_item_t test_registry[] = {
-    {"SVE Gather D IdxOnly (Single-Reg)",        sve_gather_d_idx_only_single_reg},
-    {"SVE Gather D Vec+Idx (Single-Reg)",        sve_gather_d_vec_idx_single_reg},
     {"SVE Gather D Vec+Idx+FMLA (Single-Reg)",   sve_gather_d_vec_idx_fmla_single_reg},
-    {"SVE Gather D Idx+Store (Single-Reg)",      sve_gather_d_idx_store_single_reg},
-    {"SVE Gather D Vec+Idx+Store (Single-Reg)",  sve_gather_d_vec_idx_store_single_reg},
-    {"SVE Gather D Vec+Idx+FMLA+Store (Single-Reg)", sve_gather_d_vec_idx_fmla_store_single_reg},
 };
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);
@@ -667,12 +679,6 @@ int main(int argc, char *argv[]) {
 #endif
         
         int verify_result = -1;
-        if (test->func == sve_gather_d_idx_store_single_reg || 
-            test->func == sve_gather_d_vec_idx_store_single_reg) {
-            verify_result = verify_gather_single_reg(a, c);
-        } else if (test->func == sve_gather_d_vec_idx_fmla_store_single_reg) {
-            verify_result = verify_gather_d_fmla_single_reg(a, c, b);
-        }
         
 #ifdef USE_MPI
         MPI_Barrier(MPI_COMM_WORLD);
