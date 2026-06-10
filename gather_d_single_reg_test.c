@@ -40,9 +40,6 @@ static inline void update_index_stats(uint64_t idx, uint64_t *min_idx, uint64_t 
     coverage[idx / 64] |= (1ULL << (idx % 64));
 }
 
-#pragma GCC push_options
-#pragma GCC optimize ("O3")
-
 static void sve_gather_d_idx_only_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     double *dummy_dst = (double *)a;
@@ -239,8 +236,6 @@ static void sve_gather_d_vec_idx_fmla_store_single_reg(void *a, void *b, void *c
         pool_counter--;
     }
 }
-
-#pragma GCC pop_options
 
 static inline uint64_t calc_idx_pos(uint64_t i, uint64_t chunk, uint64_t pool_iters) {
     return (i / chunk % pool_iters) * chunk + i % chunk;
