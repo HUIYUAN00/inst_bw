@@ -14,10 +14,30 @@
 static int warmup_iter = 5;
 static int test_iter = 10;
 static uint64_t buffer_size = 128 * 1024 * 1024;
+static double sparsity = 1.0;
+static int index_mode = 0;
+static int print_all_ranks = 0;
 static uint64_t index_pool_size = 0;
 static int32_t *gather_indices = NULL;
 static unsigned int random_seed = 42;
-static int print_all_ranks = 0;
+static const char *output_indices_file = NULL;
+static uint64_t index_modulo = 0;
+
+static inline double get_bandwidth(uint64_t bytes, double time_sec) {
+    return bytes / time_sec / 1e9;
+}
+
+static int compare_uint64(const void *a, const void *b) {
+    uint64_t ua = *(const uint64_t *)a;
+    uint64_t ub = *(const uint64_t *)b;
+    return (ua < ub) ? -1 : (ua > ub) ? 1 : 0;
+}
+
+static inline void update_index_stats(uint64_t idx, uint64_t *min_idx, uint64_t *max_found, uint64_t *coverage) {
+    if (idx < *min_idx) *min_idx = idx;
+    if (idx > *max_found) *max_found = idx;
+    coverage[idx / 64] |= (1ULL << (idx % 64));
+}
 
 #pragma GCC push_options
 #pragma GCC optimize ("O3")
@@ -25,175 +45,118 @@ static int print_all_ranks = 0;
 static void sve_gather_d_idx_only_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     int32_t *idx_base = gather_indices;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / vl_d;
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    uint64_t idx_inc = vl_d * sizeof(int32_t);
+    svbool_t pg = svptrue_b64();
+    uint64_t pool_counter = 0;
     
-    __asm__ volatile (
-        "mov x16, %[iter]\n"
-        "mov x17, #0\n"
-        "mov x18, %[idx_reset]\n"
-        "mov x19, %[inc]\n"
-        "mov x21, %[idx]\n"
-        "1:\n"
-        "cmp x17, #0\n"
-        "b.ne 2f\n"
-        "mov x21, x18\n"
-        "mov x17, %[reset]\n"
-        "2:\n"
-        "ptrue p0.d\n"
-        "ld1sw z8.d, p0/z, [x21, #0, MUL VL]\n"
-        "ld1d z0.d, p0/z, [%[sd], z8.d, lsl 3]\n"
-        "add x21, x21, x19\n"
-        "subs x17, x17, #1\n"
-        "subs x16, x16, #1\n"
-        "b.ne 1b\n"
-        :
-        : [sd] "r" (src_d), [idx] "r" (idx_base), [inc] "r" (idx_inc),
-          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
-          [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x21", "p0",
-          "z0", "z8", "memory"
-    );
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (pool_counter == 0) {
+            idx_base = gather_indices;
+            pool_counter = idx_pool_iters;
+        }
+        
+        svint64_t indices = svld1sw_s64(pg, idx_base);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
+        __asm__ __volatile__("" ::: "memory");
+        
+        idx_base += vl_d;
+        pool_counter--;
+    }
 }
 
 static void sve_gather_d_vec_idx_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     double *vec_x_d = (double *)b;
     int32_t *idx_base = gather_indices;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / vl_d;
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    uint64_t idx_inc = vl_d * sizeof(int32_t);
-    uint64_t dst_inc = vl_d * sizeof(double);
+    svbool_t pg = svptrue_b64();
+    uint64_t pool_counter = 0;
     
-    __asm__ volatile (
-        "mov x16, %[iter]\n"
-        "mov x17, #0\n"
-        "mov x18, %[idx_reset]\n"
-        "mov x19, %[inc]\n"
-        "mov x20, %[incd]\n"
-        "mov x21, %[idx]\n"
-        "mov x22, %[vx]\n"
-        "1:\n"
-        "cmp x17, #0\n"
-        "b.ne 2f\n"
-        "mov x21, x18\n"
-        "mov x17, %[reset]\n"
-        "2:\n"
-        "ptrue p0.d\n"
-        "ld1d z4.d, p0/z, [x22, #0, MUL VL]\n"
-        "ld1sw z8.d, p0/z, [x21, #0, MUL VL]\n"
-        "ld1d z0.d, p0/z, [%[sd], z8.d, lsl 3]\n"
-        "add x21, x21, x19\n"
-        "add x22, x22, x20\n"
-        "subs x17, x17, #1\n"
-        "subs x16, x16, #1\n"
-        "b.ne 1b\n"
-        :
-        : [sd] "r" (src_d), [vx] "r" (vec_x_d), [idx] "r" (idx_base), [inc] "r" (idx_inc), [incd] "r" (dst_inc),
-          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
-          [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x20", "x21", "x22", "p0",
-          "z0", "z4", "z8", "memory"
-    );
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (pool_counter == 0) {
+            idx_base = gather_indices;
+            pool_counter = idx_pool_iters;
+        }
+        
+        svfloat64_t vec_x = svld1_f64(pg, vec_x_d);
+        svint64_t indices = svld1sw_s64(pg, idx_base);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
+        __asm__ __volatile__("" ::: "memory");
+        
+        idx_base += vl_d;
+        vec_x_d += vl_d;
+        pool_counter--;
+    }
 }
 
 static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     double *vec_x_d = (double *)b;
     int32_t *idx_base = gather_indices;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / vl_d;
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    uint64_t idx_inc = vl_d * sizeof(int32_t);
-    uint64_t dst_inc = vl_d * sizeof(double);
+    svbool_t pg = svptrue_b64();
+    uint64_t pool_counter = 0;
     
-    __asm__ volatile (
-        "mov x16, %[iter]\n"
-        "mov x17, #0\n"
-        "mov x18, %[idx_reset]\n"
-        "mov x19, %[inc]\n"
-        "mov x20, %[incd]\n"
-        "mov x21, %[idx]\n"
-        "mov x22, %[vx]\n"
-        "1:\n"
-        "cmp x17, #0\n"
-        "b.ne 2f\n"
-        "mov x21, x18\n"
-        "mov x17, %[reset]\n"
-        "2:\n"
-        "ptrue p0.d\n"
-        "ld1d z4.d, p0/z, [x22, #0, MUL VL]\n"
-        "ld1sw z8.d, p0/z, [x21, #0, MUL VL]\n"
-        "ld1d z0.d, p0/z, [%[sd], z8.d, lsl 3]\n"
-        "fmla z4.d, p0/m, z4.d, z0.d\n"
-        "add x21, x21, x19\n"
-        "add x22, x22, x20\n"
-        "subs x17, x17, #1\n"
-        "subs x16, x16, #1\n"
-        "b.ne 1b\n"
-        :
-        : [sd] "r" (src_d), [vx] "r" (vec_x_d), [idx] "r" (idx_base), [inc] "r" (idx_inc), [incd] "r" (dst_inc),
-          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
-          [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x20", "x21", "x22", "p0",
-          "z0", "z4", "z8", "memory"
-    );
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (pool_counter == 0) {
+            idx_base = gather_indices;
+            pool_counter = idx_pool_iters;
+        }
+        
+        svfloat64_t vec_x = svld1_f64(pg, vec_x_d);
+        svint64_t indices = svld1sw_s64(pg, idx_base);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
+        vec_x = svmla_f64_z(pg, vec_x, vec_x, gathered);
+        __asm__ __volatile__("" ::: "memory");
+        
+        idx_base += vl_d;
+        vec_x_d += vl_d;
+        pool_counter--;
+    }
 }
 
 static void sve_gather_d_idx_store_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     double *dst = (double *)a;
     int32_t *idx_base = gather_indices;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / vl_d;
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    uint64_t idx_inc = vl_d * sizeof(int32_t);
-    uint64_t dst_inc = vl_d * sizeof(double);
+    svbool_t pg = svptrue_b64();
+    uint64_t pool_counter = 0;
     
-    __asm__ volatile (
-        "mov x16, %[iter]\n"
-        "mov x17, #0\n"
-        "mov x18, %[idx_reset]\n"
-        "mov x19, %[inc]\n"
-        "mov x20, %[incd]\n"
-        "mov x21, %[idx]\n"
-        "1:\n"
-        "cmp x17, #0\n"
-        "b.ne 2f\n"
-        "mov x21, x18\n"
-        "mov x17, %[reset]\n"
-        "2:\n"
-        "ptrue p0.d\n"
-        "ld1sw z8.d, p0/z, [x21, #0, MUL VL]\n"
-        "ld1d z0.d, p0/z, [%[sd], z8.d, lsl 3]\n"
-        "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-        "add x21, x21, x19\n"
-        "add %[d], %[d], x20\n"
-        "subs x17, x17, #1\n"
-        "subs x16, x16, #1\n"
-        "b.ne 1b\n"
-        : [d] "+r" (dst)
-        : [sd] "r" (src_d), [idx] "r" (idx_base), [inc] "r" (idx_inc), [incd] "r" (dst_inc),
-          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
-          [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x20", "x21", "p0",
-          "z0", "z8", "memory"
-    );
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (pool_counter == 0) {
+            idx_base = gather_indices;
+            pool_counter = idx_pool_iters;
+        }
+        
+        svint64_t indices = svld1sw_s64(pg, idx_base);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
+        svst1_f64(pg, dst, gathered);
+        
+        idx_base += vl_d;
+        dst += vl_d;
+        pool_counter--;
+    }
 }
 
 static void sve_gather_d_vec_idx_store_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -201,47 +164,31 @@ static void sve_gather_d_vec_idx_store_single_reg(void *a, void *b, void *c, uin
     double *dst = (double *)a;
     double *vec_x_d = (double *)b;
     int32_t *idx_base = gather_indices;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / vl_d;
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    uint64_t idx_inc = vl_d * sizeof(int32_t);
-    uint64_t dst_inc = vl_d * sizeof(double);
+    svbool_t pg = svptrue_b64();
+    uint64_t pool_counter = 0;
     
-    __asm__ volatile (
-        "mov x16, %[iter]\n"
-        "mov x17, #0\n"
-        "mov x18, %[idx_reset]\n"
-        "mov x19, %[inc]\n"
-        "mov x20, %[incd]\n"
-        "mov x21, %[idx]\n"
-        "mov x22, %[vx]\n"
-        "1:\n"
-        "cmp x17, #0\n"
-        "b.ne 2f\n"
-        "mov x21, x18\n"
-        "mov x17, %[reset]\n"
-        "2:\n"
-        "ptrue p0.d\n"
-        "ld1d z4.d, p0/z, [x22, #0, MUL VL]\n"
-        "ld1sw z8.d, p0/z, [x21, #0, MUL VL]\n"
-        "ld1d z0.d, p0/z, [%[sd], z8.d, lsl 3]\n"
-        "st1d z0.d, p0, [%[d], #0, MUL VL]\n"
-        "add x21, x21, x19\n"
-        "add %[d], %[d], x20\n"
-        "add x22, x22, x20\n"
-        "subs x17, x17, #1\n"
-        "subs x16, x16, #1\n"
-        "b.ne 1b\n"
-        : [d] "+r" (dst)
-        : [sd] "r" (src_d), [vx] "r" (vec_x_d), [idx] "r" (idx_base), [inc] "r" (idx_inc), [incd] "r" (dst_inc),
-          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
-          [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x20", "x21", "x22", "p0",
-          "z0", "z4", "z8", "memory"
-    );
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (pool_counter == 0) {
+            idx_base = gather_indices;
+            pool_counter = idx_pool_iters;
+        }
+        
+        svfloat64_t vec_x = svld1_f64(pg, vec_x_d);
+        svint64_t indices = svld1sw_s64(pg, idx_base);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
+        svst1_f64(pg, dst, gathered);
+        
+        idx_base += vl_d;
+        dst += vl_d;
+        vec_x_d += vl_d;
+        pool_counter--;
+    }
 }
 
 static void sve_gather_d_vec_idx_fmla_store_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
@@ -249,48 +196,32 @@ static void sve_gather_d_vec_idx_fmla_store_single_reg(void *a, void *b, void *c
     double *dst = (double *)a;
     double *vec_x_d = (double *)b;
     int32_t *idx_base = gather_indices;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk_bytes = vl_d * sizeof(double);
     uint64_t iterations = buffer_size / chunk_bytes;
     uint64_t idx_pool_iters = index_pool_size / vl_d;
     if (idx_pool_iters < 1) idx_pool_iters = 1;
     
-    uint64_t idx_inc = vl_d * sizeof(int32_t);
-    uint64_t dst_inc = vl_d * sizeof(double);
+    svbool_t pg = svptrue_b64();
+    uint64_t pool_counter = 0;
     
-    __asm__ volatile (
-        "mov x16, %[iter]\n"
-        "mov x17, #0\n"
-        "mov x18, %[idx_reset]\n"
-        "mov x19, %[inc]\n"
-        "mov x20, %[incd]\n"
-        "mov x21, %[idx]\n"
-        "mov x22, %[vx]\n"
-        "1:\n"
-        "cmp x17, #0\n"
-        "b.ne 2f\n"
-        "mov x21, x18\n"
-        "mov x17, %[reset]\n"
-        "2:\n"
-        "ptrue p0.d\n"
-        "ld1d z4.d, p0/z, [x22, #0, MUL VL]\n"
-        "ld1sw z8.d, p0/z, [x21, #0, MUL VL]\n"
-        "ld1d z0.d, p0/z, [%[sd], z8.d, lsl 3]\n"
-        "fmla z4.d, p0/m, z4.d, z0.d\n"
-        "st1d z4.d, p0, [%[d], #0, MUL VL]\n"
-        "add x21, x21, x19\n"
-        "add %[d], %[d], x20\n"
-        "add x22, x22, x20\n"
-        "subs x17, x17, #1\n"
-        "subs x16, x16, #1\n"
-        "b.ne 1b\n"
-        : [d] "+r" (dst)
-        : [sd] "r" (src_d), [vx] "r" (vec_x_d), [idx] "r" (idx_base), [inc] "r" (idx_inc), [incd] "r" (dst_inc),
-          [iter] "r" (iterations), [reset] "r" (idx_pool_iters),
-          [idx_reset] "r" (gather_indices)
-        : "x16", "x17", "x18", "x19", "x20", "x21", "x22", "p0",
-          "z0", "z4", "z8", "memory"
-    );
+    for (uint64_t i = 0; i < iterations; i++) {
+        if (pool_counter == 0) {
+            idx_base = gather_indices;
+            pool_counter = idx_pool_iters;
+        }
+        
+        svfloat64_t vec_x = svld1_f64(pg, vec_x_d);
+        svint64_t indices = svld1sw_s64(pg, idx_base);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
+        vec_x = svmla_f64_z(pg, vec_x, vec_x, gathered);
+        svst1_f64(pg, dst, vec_x);
+        
+        idx_base += vl_d;
+        dst += vl_d;
+        vec_x_d += vl_d;
+        pool_counter--;
+    }
 }
 
 #pragma GCC pop_options
@@ -302,7 +233,7 @@ static inline uint64_t calc_idx_pos(uint64_t i, uint64_t chunk, uint64_t pool_it
 static int verify_gather_single_reg(void *dst_ptr, void *src_ptr) {
     int32_t *indices = gather_indices;
     int errors = 0;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk = vl_d;
     uint64_t pool_iters = index_pool_size / chunk;
     if (pool_iters < 1) pool_iters = 1;
@@ -329,7 +260,7 @@ static int verify_gather_single_reg(void *dst_ptr, void *src_ptr) {
 static int verify_gather_d_fmla_single_reg(void *dst_ptr, void *src_ptr, void *vec_x_ptr) {
     int32_t *indices = gather_indices;
     int errors = 0;
-    uint64_t vl_d = svcntb() / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     uint64_t chunk = vl_d;
     uint64_t pool_iters = index_pool_size / chunk;
     if (pool_iters < 1) pool_iters = 1;
@@ -371,8 +302,26 @@ static test_item_t test_registry[] = {
 
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);
 
-static inline double get_bandwidth(uint64_t bytes, double time_sec) {
-    return bytes / time_sec / 1e9;
+static void print_usage(const char *prog_name) {
+    printf("Usage: %s [options]\n", prog_name);
+    printf("\nOptions:\n");
+    printf("  -h, --help              Show this help message\n");
+    printf("  -b, --buffer-size <MB>  Buffer size in MB (default: 128)\n");
+    printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 1.0)\n");
+    printf("  -m, --index-mode <N>    Index generation mode (default: 0)\n");
+    printf("                           0: Random, 1: Uniform, 2: RandomUniqueSorted\n");
+    printf("  -M, --modulo <N>        Index modulo for RandomUniqueSorted mode (default: sqrt(max_idx))\n");
+    printf("                           Limits index range to [0, modulo-1]\n");
+    printf("  -r, --random-seed <N>   Random seed for index generation (default: 42)\n");
+    printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
+    printf("  -t, --test <N>          Test iterations (default: 10)\n");
+    printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
+    printf("  -o, --output-indices <file>  Output gather indices to file\n");
+    printf("\nExamples:\n");
+    printf("  %s                               Run with default settings\n", prog_name);
+    printf("  %s -b 64 -s 0.02                 64MB buffer, 2%% sparsity\n", prog_name);
+    printf("  %s -s 1.0 -m 1                   Full range, uniform indices\n", prog_name);
+    printf("  %s -m 2 -M 1000                  RandomUniqueSorted mode with modulo=1000\n", prog_name);
 }
 
 static double run_test(test_item_t *test, void *a, void *b, void *c
@@ -419,9 +368,40 @@ int main(int argc, char *argv[]) {
 #endif
     
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            if (rank == 0) {
+                print_usage(argv[0]);
+            }
+#ifdef USE_MPI
+            MPI_Finalize();
+#endif
+            return 0;
+        }
         if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--buffer-size") == 0) {
             if (i + 1 < argc) {
                 buffer_size = (uint64_t)atoi(argv[++i]) * 1024 * 1024;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--sparsity") == 0) {
+            if (i + 1 < argc) {
+                sparsity = atof(argv[++i]);
+                if (sparsity <= 0.0) sparsity = 0.01;
+                if (sparsity > 1.0) sparsity = 1.0;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--index-mode") == 0) {
+            if (i + 1 < argc) {
+                index_mode = atoi(argv[++i]);
+                if (index_mode < 0) index_mode = 0;
+                if (index_mode > 2) index_mode = 2;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "-M") == 0 || strcmp(argv[i], "--modulo") == 0) {
+            if (i + 1 < argc) {
+                index_modulo = (uint64_t)atol(argv[++i]);
             }
             continue;
         }
@@ -447,26 +427,32 @@ int main(int argc, char *argv[]) {
             print_all_ranks = 1;
             continue;
         }
+        if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output-indices") == 0) {
+            if (i + 1 < argc) {
+                output_indices_file = argv[++i];
+            }
+            continue;
+        }
     }
     
 #ifdef USE_MPI
     MPI_Bcast(&buffer_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&sparsity, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&index_mode, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&index_modulo, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
 #endif
     
     uint64_t vl = svcntb();
-    uint64_t vl_d = vl / sizeof(int64_t);
+    uint64_t vl_d = svcntd();
     
     buffer_size = (buffer_size / 1024) * 1024;
     if (buffer_size < 1024) buffer_size = 1024;
     
-    uint64_t max_element_idx = buffer_size / sizeof(double) - 1;
-    uint64_t max_idx = (max_element_idx < INT32_MAX) ? max_element_idx : INT32_MAX;
-    
-    index_pool_size = buffer_size / sizeof(double);
+    index_pool_size = (uint64_t)(sparsity * (buffer_size / sizeof(int64_t)));
     uint64_t min_indices = vl_d * 2;
     if (index_pool_size < min_indices) index_pool_size = min_indices;
     
@@ -481,6 +467,7 @@ int main(int argc, char *argv[]) {
         printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
         printf("VL (double): %lu elements\n", vl_d);
         printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
+        printf("Sparsity: %.4f (%.2f%%)\n", sparsity, sparsity * 100);
         printf("Index Pool Size: %lu elements\n", index_pool_size);
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
@@ -513,9 +500,143 @@ int main(int argc, char *argv[]) {
     }
     
     srand(random_seed);
-    for (uint64_t i = 0; i < index_pool_size; i++) {
-        uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
-        gather_indices[i] = (int32_t)idx;
+    uint64_t max_element_idx_64 = buffer_size / sizeof(int64_t) - 1;
+    uint64_t max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
+    
+    if (index_mode == 2 && index_modulo == 0) {
+        index_modulo = (uint64_t)sqrt((double)max_idx);
+    }
+    if (index_modulo == 0) index_modulo = max_idx + 1;
+    if (index_modulo > max_idx + 1) index_modulo = max_idx + 1;
+    
+    uint64_t min_idx = max_idx, max_found = 0;
+    uint64_t coverage_buckets = (max_idx / 64) + 2;
+    uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
+    
+    const char *mode_names[] = {"Random", "Uniform", "RandomUniqueSorted"};
+    
+    if (index_mode == 0) {
+        for (uint64_t i = 0; i < index_pool_size; i++) {
+            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
+            gather_indices[i] = (int32_t)idx;
+            update_index_stats(idx, &min_idx, &max_found, coverage);
+        }
+    } else if (index_mode == 1) {
+        uint64_t stride = (max_idx + 1) / index_pool_size;
+        if (stride == 0) stride = 1;
+        for (uint64_t i = 0; i < index_pool_size; i++) {
+            uint64_t idx = i * stride;
+            if (idx > max_idx) idx = max_idx;
+            gather_indices[i] = (int32_t)idx;
+            update_index_stats(idx, &min_idx, &max_found, coverage);
+        }
+    } else {
+        uint64_t max_unique = (max_idx + 1 < index_pool_size) ? max_idx + 1 : index_pool_size;
+        uint64_t *unique_indices = (uint64_t *)malloc(max_unique * sizeof(uint64_t));
+        uint64_t unique_count = 0;
+        int attempts = 0;
+        int max_attempts = index_pool_size * 20;
+        
+        while (unique_count < max_unique && attempts < max_attempts) {
+            uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
+            uint64_t bucket = idx / 64;
+            uint64_t bit = idx % 64;
+            if (!(coverage[bucket] & (1ULL << bit))) {
+                coverage[bucket] |= (1ULL << bit);
+                unique_indices[unique_count++] = idx;
+                if (idx < min_idx) min_idx = idx;
+                if (idx > max_found) max_found = idx;
+            }
+            attempts++;
+        }
+        
+        for (uint64_t i = 0; i <= max_idx && unique_count < max_unique; i++) {
+            uint64_t bucket = i / 64;
+            uint64_t bit = i % 64;
+            if (!(coverage[bucket] & (1ULL << bit))) {
+                coverage[bucket] |= (1ULL << bit);
+                unique_indices[unique_count++] = i;
+                if (i < min_idx) min_idx = i;
+                if (i > max_found) max_found = i;
+            }
+        }
+        
+        qsort(unique_indices, unique_count, sizeof(uint64_t), compare_uint64);
+        index_pool_size = unique_count;
+        for (uint64_t i = 0; i < unique_count; i++) {
+            uint64_t idx = unique_indices[i];
+            if (index_modulo < max_idx + 1) {
+                idx = idx % index_modulo;
+            }
+            gather_indices[i] = (int32_t)idx;
+        }
+        free(unique_indices);
+    }
+    
+    uint64_t covered = 0;
+    for (uint64_t i = 0; i < coverage_buckets - 1; i++) {
+        covered += __builtin_popcountll(coverage[i]);
+    }
+    free(coverage);
+    
+    uint64_t modulo_covered = 0;
+    if (index_mode == 2 && index_modulo < max_idx + 1) {
+        uint64_t *modulo_coverage = (uint64_t *)calloc((index_modulo / 64) + 2, sizeof(uint64_t));
+        for (uint64_t i = 0; i < index_pool_size; i++) {
+            uint64_t idx = gather_indices[i];
+            modulo_coverage[idx / 64] |= (1ULL << (idx % 64));
+        }
+        for (uint64_t i = 0; i < (index_modulo / 64) + 1; i++) {
+            modulo_covered += __builtin_popcountll(modulo_coverage[i]);
+        }
+        free(modulo_coverage);
+    }
+    
+    if (rank == 0) {
+        printf("Index Mode: %s\n", mode_names[index_mode]);
+        if (index_mode == 2 && index_modulo < max_idx + 1) {
+            printf("Index Modulo: %lu (sqrt=%.2f)\n", index_modulo, sqrt((double)max_idx));
+            printf("Modulo Coverage: %lu / %lu (%.2f%%) of [0, %lu]\n", 
+                   modulo_covered, index_modulo, (double)modulo_covered / index_modulo * 100.0, index_modulo - 1);
+        }
+        printf("Max Index: %lu (buffer elements: %lu)\n", max_idx, max_element_idx_64);
+        printf("Generated Range (pre-modulo): [%lu, %lu]\n", min_idx, max_found);
+        printf("Unique Indices (pre-modulo): %lu / %lu (%.2f%%)\n", covered, index_pool_size, 
+               (double)covered / index_pool_size * 100.0);
+        printf("Coverage: %.4f%% of buffer\n\n", 
+               (double)covered / (max_idx + 1) * 100.0);
+        
+        if (output_indices_file) {
+            FILE *fp = fopen(output_indices_file, "w");
+            if (fp) {
+                fprintf(fp, "# Gather Indices Output (Single-Reg)\n");
+                fprintf(fp, "# Index Mode: %s\n", mode_names[index_mode]);
+                if (index_mode == 2 && index_modulo < max_idx + 1) {
+                    fprintf(fp, "# Index Modulo: %lu (applied after sort)\n", index_modulo);
+                    fprintf(fp, "# Modulo Coverage: [0, %lu]\n", index_modulo - 1);
+                }
+                fprintf(fp, "# Random Seed: %u\n", random_seed);
+                fprintf(fp, "# Sparsity: %.4f\n", sparsity);
+                fprintf(fp, "# Index Pool Size: %lu\n", index_pool_size);
+                fprintf(fp, "# Max Index: %lu\n", max_idx);
+                fprintf(fp, "# Generated Range (pre-modulo): [%lu, %lu]\n", min_idx, max_found);
+                fprintf(fp, "# Unique Indices (pre-modulo): %lu\n", covered);
+                if (index_mode == 2 && index_modulo < max_idx + 1) {
+                    fprintf(fp, "# Modulo Coverage: %lu / %lu (%.2f%%)\n", 
+                            modulo_covered, index_modulo, (double)modulo_covered / index_modulo * 100.0);
+                }
+                fprintf(fp, "# Format: Index | Double_Offset(bytes)\n");
+                fprintf(fp, "#\n");
+                for (uint64_t i = 0; i < index_pool_size; i++) {
+                    int32_t idx = gather_indices[i];
+                    fprintf(fp, "%10d %15lu\n", idx, (uint64_t)idx * 8);
+                }
+                fclose(fp);
+                printf("Indices written to: %s\n", output_indices_file);
+            } else {
+                fprintf(stderr, "Failed to open output file: %s\n", output_indices_file);
+            }
+        }
     }
     
     if (rank == 0) {
