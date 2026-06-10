@@ -13,11 +13,11 @@
 
 static int warmup_iter = 5;
 static int test_iter = 10;
-static uint64_t buffer_size = 128 * 1024 * 1024;
-static double sparsity = 1.0;
+static uint64_t buffer_size = 0;
+static double sparsity = 0.0;
 static int index_mode = 0;
 static int print_all_ranks = 0;
-static uint64_t index_pool_size = 0;
+static uint64_t num_nonzero = 0;
 static int32_t *gather_indices = NULL;
 static unsigned int random_seed = 42;
 static const char *output_indices_file = NULL;
@@ -41,32 +41,53 @@ static inline void update_index_stats(uint64_t idx, uint64_t *min_idx, uint64_t 
 }
 
 static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, void *c, uint64_t size, double scalar) {
-    double *src_d = (double *)c;
-    double *vec_x_d = (double *)b;
+    double *dense_vec_d = (double *)a;
+    double *sparse_vec_d = (double *)c;
     uint64_t vl_d = svcntd();
-    uint64_t iterations = buffer_size / (vl_d * sizeof(double));
+    uint64_t iterations = num_nonzero / vl_d;
     
     svbool_t pg = svptrue_b64();
-    double dot_sum = 0.0;
+    svfloat64_t dot_acc = svdup_f64(0.0);
+    int32_t *idx_ptr = gather_indices;
     
     for (uint64_t i = 0; i < iterations; i++) {
-        uint64_t idx_offset = (i * vl_d) % index_pool_size;
-        int32_t *idx_ptr = gather_indices + idx_offset;
-        
-        svfloat64_t vec_x = svld1_f64(pg, vec_x_d);
+        svfloat64_t dense_vec = svld1_f64(pg, dense_vec_d);
         svint64_t indices = svld1sw_s64(pg, idx_ptr);
-        svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
-        vec_x = svmla_f64_z(pg, vec_x, vec_x, gathered);
-        dot_sum += svaddv_f64(pg, vec_x);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, sparse_vec_d, indices);
         
-        vec_x_d += vl_d;
+        dot_acc = svmla_f64_z(pg, dot_acc, dense_vec, gathered);
+        
+        dense_vec_d += vl_d;
+        idx_ptr += vl_d;
     }
     
+    double dot_sum = svaddv_f64(pg, dot_acc);
     return dot_sum;
 }
 
 static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     last_dot_result = sve_gather_d_vec_idx_fmla_single_reg_core(a, b, c, size, scalar);
+}
+
+static double verify_dot_product_ref(void *a, void *c, uint64_t test_size) {
+    double *dense_vec = (double *)a;
+    double *sparse_vec = (double *)c;
+    uint64_t vl_d = svcntd();
+    uint64_t iterations = num_nonzero / vl_d;
+    
+    double ref_sum = 0.0;
+    int32_t *idx_ptr = gather_indices;
+    
+    for (uint64_t i = 0; i < iterations; i++) {
+        for (uint64_t j = 0; j < vl_d; j++) {
+            uint64_t idx = (uint64_t)idx_ptr[j];
+            ref_sum += dense_vec[j] * sparse_vec[idx];
+        }
+        dense_vec += vl_d;
+        idx_ptr += vl_d;
+    }
+    
+    return ref_sum;
 }
 
 typedef struct {
@@ -81,11 +102,12 @@ static test_item_t test_registry[] = {
 static const int test_count = sizeof(test_registry) / sizeof(test_registry[0]);
 
 static void print_usage(const char *prog_name) {
-    printf("Usage: %s [options]\n", prog_name);
+    printf("Usage: %s -n <num_nonzero> -s <sparsity> [options]\n", prog_name);
+    printf("\nRequired:\n");
+    printf("  -n, --num-nonzero <N>   Number of non-zero elements\n");
+    printf("  -s, --sparsity <ratio>  Sparsity ratio (0.0-1.0]\n");
     printf("\nOptions:\n");
     printf("  -h, --help              Show this help message\n");
-    printf("  -b, --buffer-size <MB>  Buffer size in MB (default: 128)\n");
-    printf("  -s, --sparsity <ratio>  Sparsity ratio 0.0-1.0 (default: 1.0)\n");
     printf("  -m, --index-mode <N>    Index generation mode (default: 0)\n");
     printf("                           0: Random, 1: Uniform, 2: RandomUniqueSorted\n");
     printf("  -M, --modulo <N>        Index modulo for RandomUniqueSorted mode (default: sqrt(max_idx))\n");
@@ -96,10 +118,10 @@ static void print_usage(const char *prog_name) {
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
     printf("  -o, --output-indices <file>  Output gather indices to file\n");
     printf("\nExamples:\n");
-    printf("  %s                               Run with default settings\n", prog_name);
-    printf("  %s -b 64 -s 0.02                 64MB buffer, 2%% sparsity\n", prog_name);
-    printf("  %s -s 1.0 -m 1                   Full range, uniform indices\n", prog_name);
-    printf("  %s -m 2 -M 1000                  RandomUniqueSorted mode with modulo=1000\n", prog_name);
+    printf("  %s -n 1000000 -s 0.01              1M non-zero elements, 1%% sparsity (100MB buffer)\n", prog_name);
+    printf("  %s -n 500000 -s 0.02               500K non-zero elements, 2%% sparsity (25MB buffer)\n", prog_name);
+    printf("  %s -n 100000 -s 0.001 -m 1         100K non-zero elements, 0.1%% sparsity, uniform indices\n", prog_name);
+    printf("  %s -n 100000 -s 0.5 -m 2 -M 1000   100K non-zero, 50%% sparsity, RandomUniqueSorted\n", prog_name);
 }
 
 static double run_test(test_item_t *test, void *a, void *b, void *c
@@ -155,17 +177,15 @@ int main(int argc, char *argv[]) {
 #endif
             return 0;
         }
-        if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--buffer-size") == 0) {
+        if (strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--num-nonzero") == 0) {
             if (i + 1 < argc) {
-                buffer_size = (uint64_t)atoi(argv[++i]) * 1024 * 1024;
+                num_nonzero = (uint64_t)atol(argv[++i]);
             }
             continue;
         }
         if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--sparsity") == 0) {
             if (i + 1 < argc) {
                 sparsity = atof(argv[++i]);
-                if (sparsity <= 0.0) sparsity = 0.01;
-                if (sparsity > 1.0) sparsity = 1.0;
             }
             continue;
         }
@@ -213,8 +233,30 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    if (num_nonzero == 0) {
+        if (rank == 0) {
+            fprintf(stderr, "Error: -n/--num-nonzero is required and must be > 0\n");
+            print_usage(argv[0]);
+        }
 #ifdef USE_MPI
-    MPI_Bcast(&buffer_size, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+        MPI_Finalize();
+#endif
+        return 1;
+    }
+    
+    if (sparsity <= 0.0 || sparsity > 1.0) {
+        if (rank == 0) {
+            fprintf(stderr, "Error: -s/--sparsity is required and must be in range (0.0, 1.0]\n");
+            print_usage(argv[0]);
+        }
+#ifdef USE_MPI
+        MPI_Finalize();
+#endif
+        return 1;
+    }
+    
+#ifdef USE_MPI
+    MPI_Bcast(&num_nonzero, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
     MPI_Bcast(&sparsity, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Bcast(&index_mode, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -227,12 +269,22 @@ int main(int argc, char *argv[]) {
     uint64_t vl = svcntb();
     uint64_t vl_d = svcntd();
     
+    num_nonzero = (num_nonzero / vl_d) * vl_d;
+    if (num_nonzero == 0) {
+        if (rank == 0) {
+            fprintf(stderr, "Error: num_nonzero too small, must be >= %lu (VL)\n", vl_d);
+        }
+#ifdef USE_MPI
+        MPI_Finalize();
+#endif
+        return 1;
+    }
+    
+    uint64_t total_elements = (uint64_t)(num_nonzero / sparsity);
+    buffer_size = total_elements * sizeof(double);
+    
     buffer_size = (buffer_size / 1024) * 1024;
     if (buffer_size < 1024) buffer_size = 1024;
-    
-    index_pool_size = (uint64_t)(sparsity * (buffer_size / sizeof(int64_t)));
-    uint64_t min_indices = vl_d * 2;
-    if (index_pool_size < min_indices) index_pool_size = min_indices;
     
     if (rank == 0) {
         printf("================================================================================\n");
@@ -244,9 +296,9 @@ int main(int argc, char *argv[]) {
         printf("================================================================================\n");
         printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
         printf("VL (double): %lu elements\n", vl_d);
-        printf("Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
+        printf("Non-Zero Elements: %lu\n", num_nonzero);
         printf("Sparsity: %.4f (%.2f%%)\n", sparsity, sparsity * 100);
-        printf("Index Pool Size: %lu elements\n", index_pool_size);
+        printf("Calculated Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
         printf("Registered Tests: %d\n", test_count);
@@ -259,7 +311,7 @@ int main(int argc, char *argv[]) {
     if (posix_memalign(&a, 64, buffer_size) != 0 ||
         posix_memalign(&b, 64, buffer_size) != 0 ||
         posix_memalign(&c, 64, buffer_size) != 0 ||
-        posix_memalign((void**)&gather_indices, 64, index_pool_size * sizeof(int32_t)) != 0) {
+        posix_memalign((void**)&gather_indices, 64, num_nonzero * sizeof(int32_t)) != 0) {
 #ifdef USE_MPI
         fprintf(stderr, "[Rank %d] Failed to allocate aligned memory\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
@@ -292,28 +344,29 @@ int main(int argc, char *argv[]) {
     uint64_t *coverage = (uint64_t *)calloc(coverage_buckets, sizeof(uint64_t));
     
     const char *mode_names[] = {"Random", "Uniform", "RandomUniqueSorted"};
+    uint64_t actual_index_count = num_nonzero;
     
     if (index_mode == 0) {
-        for (uint64_t i = 0; i < index_pool_size; i++) {
+        for (uint64_t i = 0; i < num_nonzero; i++) {
             uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
             gather_indices[i] = (int32_t)idx;
             update_index_stats(idx, &min_idx, &max_found, coverage);
         }
     } else if (index_mode == 1) {
-        uint64_t stride = (max_idx + 1) / index_pool_size;
+        uint64_t stride = (max_idx + 1) / num_nonzero;
         if (stride == 0) stride = 1;
-        for (uint64_t i = 0; i < index_pool_size; i++) {
+        for (uint64_t i = 0; i < num_nonzero; i++) {
             uint64_t idx = i * stride;
             if (idx > max_idx) idx = max_idx;
             gather_indices[i] = (int32_t)idx;
             update_index_stats(idx, &min_idx, &max_found, coverage);
         }
     } else {
-        uint64_t max_unique = (max_idx + 1 < index_pool_size) ? max_idx + 1 : index_pool_size;
+        uint64_t max_unique = (max_idx + 1 < num_nonzero) ? max_idx + 1 : num_nonzero;
         uint64_t *unique_indices = (uint64_t *)malloc(max_unique * sizeof(uint64_t));
         uint64_t unique_count = 0;
         int attempts = 0;
-        int max_attempts = index_pool_size * 20;
+        int max_attempts = num_nonzero * 20;
         
         while (unique_count < max_unique && attempts < max_attempts) {
             uint64_t idx = ((uint64_t)rand() << 32 | rand()) % (max_idx + 1);
@@ -340,7 +393,7 @@ int main(int argc, char *argv[]) {
         }
         
         qsort(unique_indices, unique_count, sizeof(uint64_t), compare_uint64);
-        index_pool_size = unique_count;
+        actual_index_count = unique_count;
         for (uint64_t i = 0; i < unique_count; i++) {
             uint64_t idx = unique_indices[i];
             if (index_modulo < max_idx + 1) {
@@ -360,7 +413,7 @@ int main(int argc, char *argv[]) {
     uint64_t modulo_covered = 0;
     if (index_mode == 2 && index_modulo < max_idx + 1) {
         uint64_t *modulo_coverage = (uint64_t *)calloc((index_modulo / 64) + 2, sizeof(uint64_t));
-        for (uint64_t i = 0; i < index_pool_size; i++) {
+        for (uint64_t i = 0; i < actual_index_count; i++) {
             uint64_t idx = gather_indices[i];
             modulo_coverage[idx / 64] |= (1ULL << (idx % 64));
         }
@@ -379,8 +432,8 @@ int main(int argc, char *argv[]) {
         }
         printf("Max Index: %lu (buffer elements: %lu)\n", max_idx, max_element_idx_64);
         printf("Generated Range (pre-modulo): [%lu, %lu]\n", min_idx, max_found);
-        printf("Unique Indices (pre-modulo): %lu / %lu (%.2f%%)\n", covered, index_pool_size, 
-               (double)covered / index_pool_size * 100.0);
+        printf("Unique Indices (pre-modulo): %lu / %lu (%.2f%%)\n", covered, num_nonzero, 
+               (double)covered / num_nonzero * 100.0);
         printf("Coverage: %.4f%% of buffer\n\n", 
                (double)covered / (max_idx + 1) * 100.0);
         
@@ -394,8 +447,8 @@ int main(int argc, char *argv[]) {
                     fprintf(fp, "# Modulo Coverage: [0, %lu]\n", index_modulo - 1);
                 }
                 fprintf(fp, "# Random Seed: %u\n", random_seed);
+                fprintf(fp, "# Non-Zero Elements: %lu\n", num_nonzero);
                 fprintf(fp, "# Sparsity: %.4f\n", sparsity);
-                fprintf(fp, "# Index Pool Size: %lu\n", index_pool_size);
                 fprintf(fp, "# Max Index: %lu\n", max_idx);
                 fprintf(fp, "# Generated Range (pre-modulo): [%lu, %lu]\n", min_idx, max_found);
                 fprintf(fp, "# Unique Indices (pre-modulo): %lu\n", covered);
@@ -405,7 +458,7 @@ int main(int argc, char *argv[]) {
                 }
                 fprintf(fp, "# Format: Index | Double_Offset(bytes)\n");
                 fprintf(fp, "#\n");
-                for (uint64_t i = 0; i < index_pool_size; i++) {
+                for (uint64_t i = 0; i < num_nonzero; i++) {
                     int32_t idx = gather_indices[i];
                     fprintf(fp, "%10d %15lu\n", idx, (uint64_t)idx * 8);
                 }
@@ -430,7 +483,7 @@ int main(int argc, char *argv[]) {
     
     for (int i = 0; i < test_count; i++) {
         test_item_t *test = &test_registry[i];
-        uint64_t bytes_per_iter = buffer_size * 2;
+        uint64_t bytes_per_iter = num_nonzero * sizeof(double) * 2;
         
 #ifdef USE_MPI
         double time_sec = run_test(test, a, b, c, MPI_COMM_WORLD);
@@ -449,6 +502,19 @@ int main(int argc, char *argv[]) {
 #ifdef USE_MPI
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
+        
+        double ref_result = verify_dot_product_ref(a, c, buffer_size);
+        double rel_error = fabs(last_dot_result - ref_result) / fabs(ref_result);
+        
+        if (rel_error < 1e-10) {
+            verify_result = 0;
+        } else {
+            verify_result = 1;
+            if (rank == 0) {
+                printf("  [Verify] SVE=%.15e REF=%.15e Error=%.15e\n", 
+                       last_dot_result, ref_result, rel_error);
+            }
+        }
         
         if (rank == 0 || print_all_ranks) {
 #ifdef USE_MPI
