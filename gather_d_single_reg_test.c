@@ -308,15 +308,17 @@ int main(int argc, char *argv[]) {
     
     void *a = NULL, *b = NULL, *c = NULL;
     
-    if (posix_memalign(&a, 64, buffer_size) != 0 ||
-        posix_memalign(&b, 64, buffer_size) != 0 ||
-        posix_memalign(&c, 64, buffer_size) != 0 ||
+    a = malloc(buffer_size);
+    b = malloc(buffer_size);
+    c = malloc(buffer_size);
+    
+    if (a == NULL || b == NULL || c == NULL ||
         posix_memalign((void**)&gather_indices, 64, num_nonzero * sizeof(int32_t)) != 0) {
 #ifdef USE_MPI
-        fprintf(stderr, "[Rank %d] Failed to allocate aligned memory\n", rank);
+        fprintf(stderr, "[Rank %d] Failed to allocate memory\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
 #else
-        fprintf(stderr, "Failed to allocate aligned memory\n");
+        fprintf(stderr, "Failed to allocate memory\n");
 #endif
         return 1;
     }
