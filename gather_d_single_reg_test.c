@@ -43,32 +43,23 @@ static inline void update_index_stats(uint64_t idx, uint64_t *min_idx, uint64_t 
 static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, void *c, uint64_t size, double scalar) {
     double *src_d = (double *)c;
     double *vec_x_d = (double *)b;
-    int32_t *idx_base = gather_indices;
     uint64_t vl_d = svcntd();
-    uint64_t chunk_bytes = vl_d * sizeof(double);
-    uint64_t iterations = buffer_size / chunk_bytes;
-    uint64_t idx_pool_iters = index_pool_size / vl_d;
-    if (idx_pool_iters < 1) idx_pool_iters = 1;
+    uint64_t iterations = buffer_size / (vl_d * sizeof(double));
     
     svbool_t pg = svptrue_b64();
-    uint64_t pool_counter = 0;
     double dot_sum = 0.0;
     
     for (uint64_t i = 0; i < iterations; i++) {
-        if (pool_counter == 0) {
-            idx_base = gather_indices;
-            pool_counter = idx_pool_iters;
-        }
+        uint64_t idx_offset = (i * vl_d) % index_pool_size;
+        int32_t *idx_ptr = gather_indices + idx_offset;
         
         svfloat64_t vec_x = svld1_f64(pg, vec_x_d);
-        svint64_t indices = svld1sw_s64(pg, idx_base);
+        svint64_t indices = svld1sw_s64(pg, idx_ptr);
         svfloat64_t gathered = svld1_gather_s64index_f64(pg, src_d, indices);
         vec_x = svmla_f64_z(pg, vec_x, vec_x, gathered);
         dot_sum += svaddv_f64(pg, vec_x);
         
-        idx_base += vl_d;
         vec_x_d += vl_d;
-        pool_counter--;
     }
     
     return dot_sum;
@@ -76,10 +67,6 @@ static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, void *
 
 static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, void *c, uint64_t size, double scalar) {
     last_dot_result = sve_gather_d_vec_idx_fmla_single_reg_core(a, b, c, size, scalar);
-}
-
-static inline uint64_t calc_idx_pos(uint64_t i, uint64_t chunk, uint64_t pool_iters) {
-    return (i / chunk % pool_iters) * chunk + i % chunk;
 }
 
 typedef struct {
