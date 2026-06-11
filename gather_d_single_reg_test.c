@@ -231,9 +231,6 @@ int main(int argc, char *argv[]) {
     uint64_t total_elements = (uint64_t)(num_nonzero / sparsity);
     buffer_size = total_elements * sizeof(double);
     
-    buffer_size = (buffer_size / 1024) * 1024;
-    if (buffer_size < 1024) buffer_size = 1024;
-    
     if (rank == 0) {
         printf("================================================================================\n");
 #ifdef USE_MPI
