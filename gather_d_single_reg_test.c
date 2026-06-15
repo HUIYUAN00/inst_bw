@@ -254,9 +254,9 @@ int main(int argc, char *argv[]) {
     
     a = malloc(num_nonzero * sizeof(double));
     b = malloc(buffer_size);
+    gather_indices = malloc(num_nonzero * sizeof(int32_t));
     
-    if (a == NULL || b == NULL ||
-        posix_memalign((void**)&gather_indices, 64, num_nonzero * sizeof(int32_t)) != 0) {
+    if (a == NULL || b == NULL || gather_indices == NULL) {
 #ifdef USE_MPI
         fprintf(stderr, "[Rank %d] Failed to allocate memory\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
