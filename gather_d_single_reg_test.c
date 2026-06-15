@@ -17,14 +17,13 @@ static uint64_t buffer_size = 0;
 static double sparsity = 0.0;
 static int print_all_ranks = 0;
 static uint64_t num_nonzero = 0;
-static int32_t *gather_indices = NULL;
 static volatile double last_dot_result = 0.0;
 
 static inline double get_bandwidth(uint64_t bytes, double time_sec) {
     return bytes / time_sec / 1e9;
 }
 
-static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, uint64_t size, double scalar) {
+static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, int32_t *indices, uint64_t size, double scalar) {
     double *dense_vec_d = (double *)a;
     double *sparse_vec_d = (double *)b;
     uint64_t vl_d = svcntd();
@@ -32,7 +31,7 @@ static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, uint64
     
     svbool_t pg = svptrue_b64();
     svfloat64_t dot_acc = svdup_f64(0.0);
-    int32_t *idx_ptr = gather_indices;
+    int32_t *idx_ptr = indices;
     
     for (uint64_t i = 0; i < iterations; i++) {
         svfloat64_t dense_vec = svld1_f64(pg, dense_vec_d);
@@ -49,18 +48,18 @@ static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, uint64
     return dot_sum;
 }
 
-static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, uint64_t size, double scalar) {
-    last_dot_result = sve_gather_d_vec_idx_fmla_single_reg_core(a, b, size, scalar);
+static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *indices, uint64_t size, double scalar) {
+    last_dot_result = sve_gather_d_vec_idx_fmla_single_reg_core(a, b, indices, size, scalar);
 }
 
-static double verify_dot_product_ref(void *a, void *b, uint64_t test_size) {
+static double verify_dot_product_ref(void *a, void *b, int32_t *indices, uint64_t test_size) {
     double *dense_vec = (double *)a;
     double *sparse_vec = (double *)b;
     uint64_t vl_d = svcntd();
     uint64_t iterations = num_nonzero / vl_d;
     
     double ref_sum = 0.0;
-    int32_t *idx_ptr = gather_indices;
+    int32_t *idx_ptr = indices;
     
     for (uint64_t i = 0; i < iterations; i++) {
         for (uint64_t j = 0; j < vl_d; j++) {
@@ -76,7 +75,7 @@ static double verify_dot_product_ref(void *a, void *b, uint64_t test_size) {
 
 typedef struct {
     const char *name;
-    void (*func)(void *a, void *b, uint64_t size, double scalar);
+    void (*func)(void *a, void *b, int32_t *indices, uint64_t size, double scalar);
 } test_item_t;
 
 static test_item_t test_registry[] = {
@@ -101,7 +100,7 @@ static void print_usage(const char *prog_name) {
     printf("  %s -n 100000 -s 0.001              100K non-zero elements, 0.1%% sparsity\n", prog_name);
 }
 
-static double run_test(test_item_t *test, void *a, void *b
+static double run_test(test_item_t *test, void *a, void *b, int32_t *indices
 #ifdef USE_MPI
     , MPI_Comm comm
 #endif
@@ -114,7 +113,7 @@ static double run_test(test_item_t *test, void *a, void *b
 #endif
     
     for (int i = 0; i < warmup_iter; i++) {
-        test->func(a, b, buffer_size, scalar);
+        test->func(a, b, indices, buffer_size, scalar);
     }
     
 #ifdef USE_MPI
@@ -122,7 +121,7 @@ static double run_test(test_item_t *test, void *a, void *b
 #endif
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (int i = 0; i < test_iter; i++) {
-        test->func(a, b, buffer_size, scalar);
+        test->func(a, b, indices, buffer_size, scalar);
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
 #ifdef USE_MPI
@@ -251,6 +250,7 @@ int main(int argc, char *argv[]) {
     }
     
     void *a = NULL, *b = NULL;
+    int32_t *gather_indices = NULL;
     
     a = malloc(num_nonzero * sizeof(double));
     b = malloc(buffer_size);
@@ -313,9 +313,9 @@ int main(int argc, char *argv[]) {
         uint64_t bytes_per_iter = num_nonzero * sizeof(double) * 2;
         
 #ifdef USE_MPI
-        double time_sec = run_test(test, a, b, MPI_COMM_WORLD);
+        double time_sec = run_test(test, a, b, gather_indices, MPI_COMM_WORLD);
 #else
-        double time_sec = run_test(test, a, b);
+        double time_sec = run_test(test, a, b, gather_indices);
 #endif
         double bandwidth = get_bandwidth(bytes_per_iter, time_sec);
         
@@ -330,7 +330,7 @@ int main(int argc, char *argv[]) {
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
         
-        double ref_result = verify_dot_product_ref(a, b, buffer_size);
+        double ref_result = verify_dot_product_ref(a, b, gather_indices, buffer_size);
         double rel_error = fabs(last_dot_result - ref_result) / fabs(ref_result);
         
         if (rel_error < 1e-10) {
