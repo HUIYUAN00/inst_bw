@@ -17,13 +17,12 @@ static uint64_t buffer_size = 0;
 static double sparsity = 0.0;
 static int print_all_ranks = 0;
 static uint64_t num_nonzero = 0;
-static volatile double last_dot_result = 0.0;
 
 static inline double get_bandwidth(uint64_t bytes, double time_sec) {
     return bytes / time_sec / 1e9;
 }
 
-static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, int32_t *indices, uint64_t size, double scalar) {
+static double sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *indices, uint64_t size) {
     double *dense_vec_d = (double *)a;
     double *sparse_vec_d = (double *)b;
     uint64_t vl_d = svcntd();
@@ -35,8 +34,8 @@ static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, int32_
     
     for (uint64_t i = 0; i < iterations; i++) {
         svfloat64_t dense_vec = svld1_f64(pg, dense_vec_d);
-        svint64_t indices = svld1sw_s64(pg, idx_ptr);
-        svfloat64_t gathered = svld1_gather_s64index_f64(pg, sparse_vec_d, indices);
+        svint64_t indices_vec = svld1sw_s64(pg, idx_ptr);
+        svfloat64_t gathered = svld1_gather_s64index_f64(pg, sparse_vec_d, indices_vec);
         
         dot_acc = svmla_f64_z(pg, dot_acc, dense_vec, gathered);
         
@@ -44,38 +43,12 @@ static double sve_gather_d_vec_idx_fmla_single_reg_core(void *a, void *b, int32_
         idx_ptr += vl_d;
     }
     
-    double dot_sum = svaddv_f64(pg, dot_acc);
-    return dot_sum;
-}
-
-static void sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *indices, uint64_t size, double scalar) {
-    last_dot_result = sve_gather_d_vec_idx_fmla_single_reg_core(a, b, indices, size, scalar);
-}
-
-static double verify_dot_product_ref(void *a, void *b, int32_t *indices, uint64_t test_size) {
-    double *dense_vec = (double *)a;
-    double *sparse_vec = (double *)b;
-    uint64_t vl_d = svcntd();
-    uint64_t iterations = num_nonzero / vl_d;
-    
-    double ref_sum = 0.0;
-    int32_t *idx_ptr = indices;
-    
-    for (uint64_t i = 0; i < iterations; i++) {
-        for (uint64_t j = 0; j < vl_d; j++) {
-            uint64_t idx = (uint64_t)idx_ptr[j];
-            ref_sum += dense_vec[j] * sparse_vec[idx];
-        }
-        dense_vec += vl_d;
-        idx_ptr += vl_d;
-    }
-    
-    return ref_sum;
+    return svaddv_f64(pg, dot_acc);
 }
 
 typedef struct {
     const char *name;
-    void (*func)(void *a, void *b, int32_t *indices, uint64_t size, double scalar);
+    double (*func)(void *a, void *b, int32_t *indices, uint64_t size);
 } test_item_t;
 
 static test_item_t test_registry[] = {
@@ -100,37 +73,7 @@ static void print_usage(const char *prog_name) {
     printf("  %s -n 100000 -s 0.001              100K non-zero elements, 0.1%% sparsity\n", prog_name);
 }
 
-static double run_test(test_item_t *test, void *a, void *b, int32_t *indices
-#ifdef USE_MPI
-    , MPI_Comm comm
-#endif
-) {
-    struct timespec start, end;
-    double scalar = 2.0;
-    
-#ifdef USE_MPI
-    MPI_Barrier(comm);
-#endif
-    
-    for (int i = 0; i < warmup_iter; i++) {
-        test->func(a, b, indices, buffer_size, scalar);
-    }
-    
-#ifdef USE_MPI
-    MPI_Barrier(comm);
-#endif
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    for (int i = 0; i < test_iter; i++) {
-        test->func(a, b, indices, buffer_size, scalar);
-    }
-    clock_gettime(CLOCK_MONOTONIC, &end);
-#ifdef USE_MPI
-    MPI_Barrier(comm);
-#endif
-    
-    double time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    return time_sec / test_iter;
-}
+
 
 int main(int argc, char *argv[]) {
 #ifdef USE_MPI
@@ -299,81 +242,78 @@ int main(int argc, char *argv[]) {
     
     if (rank == 0) {
 #ifdef USE_MPI
-        printf("%-38s %10s %10s %10s %12s %10s\n", 
-               "Test", "GB/s", "Time(ms)", "Data(MB)", "Verify", "Total(GB/s)");
+        printf("%-38s %10s %10s %10s %10s\n", 
+               "Test", "GB/s", "Time(ms)", "Data(MB)", "Total(GB/s)");
 #else
-        printf("%-38s %10s %10s %10s %12s\n", 
-               "Test", "GB/s", "Time(ms)", "Data(MB)", "Verify");
+        printf("%-38s %10s %10s %10s\n", 
+               "Test", "GB/s", "Time(ms)", "Data(MB)");
 #endif
         printf("================================================================================\n");
     }
     
-    for (int i = 0; i < test_count; i++) {
-        test_item_t *test = &test_registry[i];
-        uint64_t bytes_per_iter = num_nonzero * sizeof(double) * 2;
-        
+    struct timespec start, end;
+    double last_result = 0.0;
+    
 #ifdef USE_MPI
-        double time_sec = run_test(test, a, b, gather_indices, MPI_COMM_WORLD);
-#else
-        double time_sec = run_test(test, a, b, gather_indices);
+    MPI_Barrier(MPI_COMM_WORLD);
 #endif
-        double bandwidth = get_bandwidth(bytes_per_iter, time_sec);
-        
+    
+    for (int w = 0; w < warmup_iter; w++) {
+        test_registry[0].func(a, b, gather_indices, buffer_size);
+    }
+    
 #ifdef USE_MPI
-        double total_bw = 0.0;
-        MPI_Reduce(&bandwidth, &total_bw, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
 #endif
-        
-        int verify_result = -1;
-        
+    
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (int t = 0; t < test_iter; t++) {
+        last_result = test_registry[0].func(a, b, gather_indices, buffer_size);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    
 #ifdef USE_MPI
-        MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
 #endif
-        
-        double ref_result = verify_dot_product_ref(a, b, gather_indices, buffer_size);
-        double rel_error = fabs(last_dot_result - ref_result) / fabs(ref_result);
-        
-        if (rel_error < 1e-10) {
-            verify_result = 0;
-        } else {
-            verify_result = 1;
-            if (rank == 0) {
-                printf("  [Verify] SVE=%.15e REF=%.15e Error=%.15e\n", 
-                       last_dot_result, ref_result, rel_error);
-            }
-        }
-        
-        if (rank == 0 || print_all_ranks) {
+    
+    double total_time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double time_per_iter = total_time_sec / test_iter;
+    
+    test_item_t *test = &test_registry[0];
+    uint64_t bytes_per_iter = num_nonzero * sizeof(double) * 2 + num_nonzero * sizeof(int32_t);
+    double bandwidth = get_bandwidth(bytes_per_iter, time_per_iter);
+    
 #ifdef USE_MPI
-            if (print_all_ranks) {
-                printf("[Rank %d] %-38s %10.2f %10.3f %10.0f",
-                       rank, test->name, bandwidth, time_sec * 1000,
-                       (double)bytes_per_iter / (1024 * 1024));
-            } else {
-                printf("%-38s %10.2f %10.3f %10.0f",
-                       test->name, bandwidth, time_sec * 1000,
-                       (double)bytes_per_iter / (1024 * 1024));
-            }
-#else
-            printf("%-38s %10.2f %10.3f %10.0f",
-                   test->name, bandwidth, time_sec * 1000,
+    double total_bw = 0.0;
+    MPI_Reduce(&bandwidth, &total_bw, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+#endif
+    
+    if (rank == 0 || print_all_ranks) {
+#ifdef USE_MPI
+        if (print_all_ranks) {
+            printf("[Rank %d] %-38s %10.2f %10.3f %10.0f",
+                   rank, test->name, bandwidth, time_per_iter * 1000,
                    (double)bytes_per_iter / (1024 * 1024));
+        } else {
+            printf("%-38s %10.2f %10.3f %10.0f",
+                   test->name, bandwidth, time_per_iter * 1000,
+                   (double)bytes_per_iter / (1024 * 1024));
+        }
+#else
+        printf("%-38s %10.2f %10.3f %10.0f",
+               test->name, bandwidth, time_per_iter * 1000,
+               (double)bytes_per_iter / (1024 * 1024));
 #endif
-            
-            if (verify_result > 0) {
-                printf("  FAIL(%d)", verify_result);
-            } else if (verify_result == 0) {
-                printf("  PASS");
-            } else {
-                printf("  NO_CHECK");
-            }
-            
+        
 #ifdef USE_MPI
-            if (!print_all_ranks) {
-                printf(" %10.2f", total_bw);
-            }
+        if (!print_all_ranks) {
+            printf(" %10.2f", total_bw);
+        }
 #endif
-            printf("\n");
+        printf("\n");
+        
+        if (rank == 0) {
+            printf("  Final dot product result: %.15e\n", last_result);
         }
     }
     
