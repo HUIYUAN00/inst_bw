@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <sys/time.h>
 #include <arm_sve.h>
 
 #ifdef USE_MPI
@@ -17,10 +18,6 @@ static uint64_t buffer_size = 0;
 static double sparsity = 0.0;
 static int print_all_ranks = 0;
 static uint64_t num_nonzero = 0;
-
-static inline double get_bandwidth(uint64_t bytes, double time_sec) {
-    return bytes / time_sec / 1e9;
-}
 
 static double sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *indices, uint64_t size) {
     double *dense_vec_d = (double *)a;
@@ -242,16 +239,16 @@ int main(int argc, char *argv[]) {
     
     if (rank == 0) {
 #ifdef USE_MPI
-        printf("%-38s %10s %10s %10s %10s\n", 
-               "Test", "GB/s", "Time(ms)", "Data(MB)", "Total(GB/s)");
-#else
         printf("%-38s %10s %10s %10s\n", 
-               "Test", "GB/s", "Time(ms)", "Data(MB)");
+               "Test", "MFLOPS", "Time(ms)", "Total(MFLOPS)");
+#else
+        printf("%-38s %10s %10s\n", 
+               "Test", "MFLOPS", "Time(ms)");
 #endif
         printf("================================================================================\n");
     }
     
-    struct timespec start, end;
+    struct timeval start, end;
     double last_result = 0.0;
     
 #ifdef USE_MPI
@@ -266,48 +263,44 @@ int main(int argc, char *argv[]) {
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
     
-    clock_gettime(CLOCK_MONOTONIC, &start);
+    gettimeofday(&start, NULL);
     for (int t = 0; t < test_iter; t++) {
         last_result = test_registry[0].func(a, b, gather_indices, buffer_size);
     }
-    clock_gettime(CLOCK_MONOTONIC, &end);
+    gettimeofday(&end, NULL);
     
 #ifdef USE_MPI
     MPI_Barrier(MPI_COMM_WORLD);
 #endif
     
-    double total_time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double total_time_sec = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
     double time_per_iter = total_time_sec / test_iter;
     
     test_item_t *test = &test_registry[0];
-    uint64_t bytes_per_iter = num_nonzero * sizeof(double) * 2 + num_nonzero * sizeof(int32_t);
-    double bandwidth = get_bandwidth(bytes_per_iter, time_per_iter);
+    double mflops = (double)num_nonzero * 2.0 / time_per_iter / 1e6;
     
 #ifdef USE_MPI
-    double total_bw = 0.0;
-    MPI_Reduce(&bandwidth, &total_bw, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    double total_mflops = 0.0;
+    MPI_Reduce(&mflops, &total_mflops, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 #endif
     
     if (rank == 0 || print_all_ranks) {
 #ifdef USE_MPI
         if (print_all_ranks) {
-            printf("[Rank %d] %-38s %10.2f %10.3f %10.0f",
-                   rank, test->name, bandwidth, time_per_iter * 1000,
-                   (double)bytes_per_iter / (1024 * 1024));
+            printf("[Rank %d] %-38s %10.2f %10.3f",
+                   rank, test->name, mflops, time_per_iter * 1000);
         } else {
-            printf("%-38s %10.2f %10.3f %10.0f",
-                   test->name, bandwidth, time_per_iter * 1000,
-                   (double)bytes_per_iter / (1024 * 1024));
+            printf("%-38s %10.2f %10.3f",
+                   test->name, mflops, time_per_iter * 1000);
         }
 #else
-        printf("%-38s %10.2f %10.3f %10.0f",
-               test->name, bandwidth, time_per_iter * 1000,
-               (double)bytes_per_iter / (1024 * 1024));
+        printf("%-38s %10.2f %10.3f",
+               test->name, mflops, time_per_iter * 1000);
 #endif
         
 #ifdef USE_MPI
         if (!print_all_ranks) {
-            printf(" %10.2f", total_bw);
+            printf(" %10.2f", total_mflops);
         }
 #endif
         printf("\n");

@@ -1,6 +1,6 @@
 CC = gcc
 MPICC = mpicc
-CFLAGS = -O3 -march=armv8-a+sve -mtune=native -Wall
+CFLAGS = -O3 -fPIC -msve-vector-bits=256 -march=armv8.3-a+sve -Wall
 LDFLAGS = -lm
 MPI_CFLAGS = $(CFLAGS) -DUSE_MPI
 OMP_CFLAGS = $(CFLAGS) -fopenmp
