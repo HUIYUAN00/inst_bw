@@ -7,6 +7,9 @@ gather_d_single_reg_test
 gather_d_single_reg_test_mpi
 sparse_spmv_test
 sparse_spmv_test_mpi
+matrix_scale_test
+matrix_scale_test_mpi
 *.o
 opencode.json
 sparse_matrix*.txt
+indices*.txt

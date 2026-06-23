@@ -5,7 +5,7 @@ LDFLAGS = -lm
 MPI_CFLAGS = $(CFLAGS) -DUSE_MPI
 OMP_CFLAGS = $(CFLAGS) -fopenmp
 
-all: sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi
+all: sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi matrix_scale_test matrix_scale_test_mpi
 
 sve_bw_test: sve_bw_test.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -34,8 +34,14 @@ gather_d_single_reg_test: gather_d_single_reg_test.c
 gather_d_single_reg_test_mpi: gather_d_single_reg_test.c
 	$(MPICC) $(MPI_CFLAGS) $(LDFLAGS) -o $@ $<
 
+matrix_scale_test: matrix_scale_test.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+matrix_scale_test_mpi: matrix_scale_test.c
+	$(MPICC) $(MPI_CFLAGS) -o $@ $<
+
 clean:
-	rm -f sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi
+	rm -f sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi matrix_scale_test matrix_scale_test_mpi
 
 run: sve_bw_test_mpi
 	mpirun --allow-run-as-root -np 4 ./sve_bw_test_mpi
@@ -67,4 +73,10 @@ run_gather_d_single: gather_d_single_reg_test
 run_gather_d_single_mpi: gather_d_single_reg_test_mpi
 	mpirun --allow-run-as-root -np 4 ./gather_d_single_reg_test_mpi
 
-.PHONY: all clean run run_single run_gs run_gs_mpi run_stream_omp run_stream_omp_8 run_spmv run_spmv_mpi run_gather_d_single run_gather_d_single_mpi
+run_matrix_scale: matrix_scale_test
+	./matrix_scale_test
+
+run_matrix_scale_mpi: matrix_scale_test_mpi
+	mpirun --allow-run-as-root -np 4 ./matrix_scale_test_mpi
+
+.PHONY: all clean run run_single run_gs run_gs_mpi run_stream_omp run_stream_omp_8 run_spmv run_spmv_mpi run_gather_d_single run_gather_d_single_mpi run_matrix_scale run_matrix_scale_mpi
