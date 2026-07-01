@@ -9,6 +9,8 @@ sparse_spmv_test
 sparse_spmv_test_mpi
 matrix_scale_test
 matrix_scale_test_mpi
+hermitian_spmv_test
+hermitian_spmv_test_mpi
 *.o
 opencode.json
 sparse_matrix*.txt
