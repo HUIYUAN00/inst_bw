@@ -204,15 +204,15 @@ spmv_standard:
 	fadd d0, d0, d1                /* d0 += sum_im */
 	fmov x13, d0                   /* x13 = 新的 sum_im */
 
-	/* ===== 外积(逻辑下三角贡献): conj(a) * x[i], fcmla 共轭复数乘法, 仅 col > i (p4/p6 掩码) ===== */
+	/* ===== 外积(逻辑下三角贡献): conj(a) * x[i], 仅 col > i (p4/p6 掩码) ===== */
+	/* 策略: 先对 val 取共轭(negate odd lanes),再用标准 fcmla #0/#90 复数乘法 */
+	/* fneg:       z2/z3 odd lanes 取反 → conj(val) = (a.re, -a.im) */
 	/* fcmla #0:   Zd.even += Zn1.even * Zn2.even (re*re) */
-	/*             Zd.odd  += Zn1.odd  * Zn2.even (im*re) */
-	/* fcmla #270: Zd.even += Zn1.odd  * Zn2.odd  (im*im) */
-	/*             Zd.odd  -= Zn1.even * Zn2.odd  (-re*im) */
-	/* fneg odd:   Zd.odd  = -(im*re - re*im) = re*im - im*re */
-	/* 结果: even = re*re + im*im, odd = re*im - im*re = conj(a)*x */
-	/* 先共轭 val: negate odd lanes (虚部取反),再用标准复数乘法 */
-	mov p7.b, p8.b                       /* p7 = odd lanes (from p8) */
+	/*             Zd.odd  += Zn1.odd  * Zn2.even (-im*re) */
+	/* fcmla #90:  Zd.even -= Zn1.odd  * Zn2.odd  (-(-im)*im = im*im) */
+	/*             Zd.odd  += Zn1.even * Zn2.odd  (re*im) */
+	/* 结果: even = re*re + im*im, odd = -im*re + re*im = conj(a)*x */
+	mov p7.b, p8.b                       /* p7 = odd lanes (from p8,循环不变量) */
 	fneg z2.d, p7/m, z2.d               /* z2 = conj(val) low half */
 	fneg z3.d, p7/m, z3.d               /* z3 = conj(val) high half */
 	mov z6.d, #0
