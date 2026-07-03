@@ -36,12 +36,12 @@
  *
  * Register allocation:
  *   x6=i  x7=row_start  x8=row_end  x9=j  x10=temp  x11=VL_doubles
- *   x12=sum_re  x13=sum_im  x14=xi_re(GPR)  x15=xi_im(GPR)
+ *   x12=sum_re  x13=sum_im
  *   q4/v4=vec[i](128bit)
  *   x19=y  x20=val  x21=vec  x22=rp  x23=ci  x24=dim
  *   z0=i-bcast  z1=col_idx(64bit)  z2=val(lo)  z3=val(hi)
  *   z4=x[col](lo)  z5=x[col](hi)  z6=result(lo)  z7=result(hi)
- *   z8=col*2  z9=col*2+1  z10/z11=temp  z12=xi_re-bcast  z13=xi_im-bcast
+ *   z8=col*2  z9=col*2+1  z10/z11=temp
  *   z14=y[col]  z15=unused
  *   p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
  *   p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
@@ -103,8 +103,7 @@ spmv_standard:
 	/* 操作数据: vec[i] = [re, im],128 位整体加载到 q4 */
 	add x10, x21, x6, lsl #4     /* x10 = &vec[i],lsl #4 = *16 字节(complex_double_t) */
 	ldr q4, [x10]                /* q4 = vec[i] = [re, im],128 位整体加载 */
-	mov x14, v4.d[0]             /* x14 = vec[i].re,从 v4 lane 0 提取到 GPR */
-	mov x15, v4.d[1]             /* x15 = vec[i].im,从 v4 lane 1 提取到 GPR */
+	mov z14.q, q4                /* z14 = x[i] interleaved [re, im, re, im, ...] */
 
 	/* 初始化累加器 */
 	mov x12, #0                  /* x12 = sum_re = 0,累加 y[i].re 的贡献 */
@@ -139,11 +138,6 @@ spmv_standard:
 	zip2 p5.d, p1.d, p1.d        /* p5 = zip2(p1, p1),高半部分的 col>=i 谓词 */
 	zip1 p4.d, p2.d, p2.d        /* p4 = zip1(p2, p2),低半部分的 col>i 谓词 */
 	zip2 p6.d, p2.d, p2.d        /* p6 = zip2(p2, p2),高半部分的 col>i 谓词 */
-
-	/* 广播 x[i] 并交错为 [re, im, re, im, ...] 格式用于 fcmla */
-	dup z12.d, x14               /* z12 = [xi_re, xi_re, ...],广播 x[i].re */
-	dup z13.d, x15               /* z13 = [xi_im, xi_im, ...],广播 x[i].im */
-	zip1 z14.d, z12.d, z13.d     /* z14 = x[i] interleaved [re, im, ...] */
 
 	/* 顺序加载矩阵值 val[j],交错存储为 [re, im, re, im, ...] */
 	ld1d z2.d, p3/z, [x10]       /* z2 = val[j] low half, sequential load */
