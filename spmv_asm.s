@@ -45,7 +45,7 @@
  *   z14=y[col]  z15=内积低半累加器
  *   p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
  *   p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
- *   p7=temp  p8=odd-lanes(循环不变量,共轭符号修正)
+ *   p7=temp  p8=odd-lanes(循环不变量,归约分离实虚部)
  */
 
 spmv_standard:
@@ -165,22 +165,17 @@ spmv_standard:
 	fcmla z11.d, p5/m, z3.d, z4.d, #90   /* z11 += rotated(-im, re) * x[col] */
 
 	/* ===== 外积(逻辑下三角贡献): conj(a) * x[i], 仅 col > i (p4/p6 掩码) ===== */
-	/* 策略: 先对 val 取共轭(negate odd lanes),再用标准 fcmla #0/#90 复数乘法 */
-	/* fneg:       z2/z3 odd lanes 取反 → conj(val) = (a.re, -a.im) */
 	/* fcmla #0:   Zd.even += Zn1.even * Zn2.even (re*re) */
-	/*             Zd.odd  += Zn1.odd  * Zn2.even (-im*re) */
-	/* fcmla #90:  Zd.even -= Zn1.odd  * Zn2.odd  (-(-im)*im = im*im) */
-	/*             Zd.odd  += Zn1.even * Zn2.odd  (re*im) */
-	/* 结果: even = re*re + im*im, odd = -im*re + re*im = conj(a)*x */
-	mov p7.b, p8.b                       /* p7 = odd lanes (from p8,循环不变量) */
-	fneg z2.d, p7/m, z2.d               /* z2 = conj(val) low half */
-	fneg z3.d, p7/m, z3.d               /* z3 = conj(val) high half */
+	/*             Zd.odd  += Zn1.odd  * Zn2.even (im*re) */
+	/* fcmla #270: Zd.even += Zn1.odd  * Zn2.odd  (im*im) */
+	/*             Zd.odd  -= Zn1.even * Zn2.odd  (-re*im) */
+	/* 结果: even = re*re + im*im, odd = im*re - re*im = conj(a)*x */
 	mov z6.d, #0
-	fcmla z6.d, p4/m, z2.d, z5.d, #0    /* z6 = conj(val) * x[i] (re*re, -im*re) */
-	fcmla z6.d, p4/m, z2.d, z5.d, #90   /* z6 += rotated(im, re) * x[i] */
+	fcmla z6.d, p4/m, z2.d, z5.d, #0    /* z6 = val * x[i] (re*re, im*re) */
+	fcmla z6.d, p4/m, z2.d, z5.d, #270  /* z6 += conj correction (im*im, -re*im) */
 	mov z7.d, #0
-	fcmla z7.d, p6/m, z3.d, z5.d, #0    /* z7 = conj(val) * x[i] (re*re, -im*re) */
-	fcmla z7.d, p6/m, z3.d, z5.d, #90   /* z7 += rotated(im, re) * x[i] */
+	fcmla z7.d, p6/m, z3.d, z5.d, #0    /* z7 = val * x[i] (re*re, im*re) */
+	fcmla z7.d, p6/m, z3.d, z5.d, #270  /* z7 += conj correction (im*im, -re*im) */
 
 	/* 外积散射存储(逻辑下三角贡献): y[col] += conj(a) * x[i],仅 col > i (p4/p6 掩码) */
 	/* 存储上三角元素 A[i][col] 经共轭后贡献到逻辑下三角位置 y[col] */
