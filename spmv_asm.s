@@ -36,13 +36,13 @@
  *
  * Register allocation:
  *   x6=i  x7=row_start  x8=row_end  x9=j  x10=temp  x11=VL_doubles
- *   x12=sum_re  x13=sum_im
+ *   x12=unused  x13=unused
  *   q4/v4=vec[i](128bit)
  *   x19=y  x20=val  x21=vec  x22=rp  x23=ci  x24=dim
  *   z0=i-bcast  z1=col_idx(64bit)  z2=val(lo)  z3=val(hi)
  *   z4=x[col](lo)  z5=x[col](hi)  z6=result(lo)  z7=result(hi)
- *   z8=col*2  z9=col*2+1  z10/z11=temp
- *   z14=y[col]  z15=unused
+ *   z8=col*2  z9=col*2+1  z10=temp  z11=内积高半累加器  z12=xi_re-bcast  z13=xi_im-bcast
+ *   z14=y[col]  z15=内积低半累加器
  *   p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
  *   p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
  *   p7=temp  p8=odd-lanes(循环不变量,共轭符号修正)
@@ -103,11 +103,12 @@ spmv_standard:
 	/* 操作数据: vec[i] = [re, im],128 位整体加载到 q4 */
 	add x10, x21, x6, lsl #4     /* x10 = &vec[i],lsl #4 = *16 字节(complex_double_t) */
 	ldr q4, [x10]                /* q4 = vec[i] = [re, im],128 位整体加载 */
-	mov z14.q, q4                /* z14 = x[i] interleaved [re, im, re, im, ...] */
+	dup z12.d, z4.d[0]           /* z12 = [xi_re, xi_re, ...],从 z4 lane 0 广播 */
+	dup z13.d, z4.d[1]           /* z13 = [xi_im, xi_im, ...],从 z4 lane 1 广播 */
 
 	/* 初始化累加器 */
-	mov x12, #0                  /* x12 = sum_re = 0,累加 y[i].re 的贡献 */
-	mov x13, #0                  /* x13 = sum_im = 0,累加 y[i].im 的贡献 */
+	mov z15.d, #0                /* z15 = 内积低半累加器 [re, im, ...], 初始为 0 */
+	mov z11.d, #0                /* z11 = 内积高半累加器 [re, im, ...], 初始为 0 */
 
 	/* ----- 内层循环: 向量化处理第 i 行的非零元素 j = row_start..row_end-1 ----- */
 	/* 每次迭代处理 VL_doubles 个非零元素 */
@@ -139,17 +140,16 @@ spmv_standard:
 	zip1 p4.d, p2.d, p2.d        /* p4 = zip1(p2, p2),低半部分的 col>i 谓词 */
 	zip2 p6.d, p2.d, p2.d        /* p6 = zip2(p2, p2),高半部分的 col>i 谓词 */
 
-	/* 顺序加载矩阵值 val[j],交错存储为 [re, im, re, im, ...] */
-	ld1d z2.d, p3/z, [x10]       /* z2 = val[j] low half, sequential load */
+	/* 顺序加载矩阵值 val[j],内存中本身按 [re, im, re, im, ...] 顺序存储 */
+	ld1d z2.d, p3/z, [x10]       /* z2 = val[j..j+VL/2), 顺序读取前半部分 */
 	add x10, x10, x11, lsl #3    /* x10 = &val[j+VL_doubles/2], 前进到高半部分基址 */
-	ld1d z3.d, p5/z, [x10]       /* z3 = val[j+VL_doubles/2] high half, sequential load */
+	ld1d z3.d, p5/z, [x10]       /* z3 = val[j+VL/2..j+VL), 顺序读取后半部分 */
 
 	/* 计算输入向量的偏移并 gather 加载 vec[col] */
-	lsl z8.d, z1.d, #1           /* z8 = col*2, vec[col].re 的索引 */
-	mov z9.d, z8.d               /* z9 = z8 */
-	add z9.d, z9.d, #1           /* z9 = col*2+1, vec[col].im 的索引 */
-	ld1d z4.d, p0/z, [x21, z8.d, lsl #3]  /* z4 = vec[col].re, gather load (p0: 非交错谓词) */
-	ld1d z5.d, p0/z, [x21, z9.d, lsl #3]  /* z5 = vec[col].im, gather load (p0: 非交错谓词) */
+	lsl z8.d, z1.d, #1           /* z8 = col*2, vec[col] 的 double 索引 */
+	add x10, x21, #8             /* x10 = &vec[0].im, 虚部基址 */
+	ld1d z4.d, p1/z, [x21, z8.d, lsl #3]  /* z4 = vec[col].re, gather load (p1: col>=i) */
+	ld1d z5.d, p1/z, [x10, z8.d, lsl #3]  /* z5 = vec[col].im, gather load (p1: col>=i) */
 	zip1 z10.d, z4.d, z5.d       /* z10 = x[col] low, interleaved [re, im, ...] */
 	zip2 z4.d, z4.d, z5.d        /* z4 = x[col] high, interleaved [re, im, ...] */
 
@@ -159,44 +159,13 @@ spmv_standard:
 	/* fcmla #90: Zd.even -= Zn1.odd  * Zn2.odd  (-im*im) */
 	/*            Zd.odd  += Zn1.even * Zn2.odd  (re*im) */
 	/* 结果: even = re*re - im*im, odd = im*re + re*im */
-	mov z6.d, #0
-	fcmla z6.d, p3/m, z2.d, z10.d, #0   /* z6 = val * x[col] (re*re, im*re) */
-	fcmla z6.d, p3/m, z2.d, z10.d, #90  /* z6 += rotated(-im, re) * x[col] */
-	mov z7.d, #0
-	fcmla z7.d, p5/m, z3.d, z4.d, #0    /* z7 = val * x[col] (re*re, im*re) */
-	fcmla z7.d, p5/m, z3.d, z4.d, #90   /* z7 += rotated(-im, re) * x[col] */
+	/* 直接累加到 z15(低半)/z11(高半),p3/p5 互斥,无需每次清零 */
+	fcmla z15.d, p3/m, z2.d, z10.d, #0   /* z15 += val * x[col] (re*re, im*re) */
+	fcmla z15.d, p3/m, z2.d, z10.d, #90  /* z15 += rotated(-im, re) * x[col] */
+	fcmla z11.d, p5/m, z3.d, z4.d, #0    /* z11 += val * x[col] (re*re, im*re) */
+	fcmla z11.d, p5/m, z3.d, z4.d, #90   /* z11 += rotated(-im, re) * x[col] */
 
-	/* 内积归约: 将向量结果累加到标量 sum_re (x12) 和 sum_im (x13) */
-	/* 创建 even/odd lane 谓词用于分离实部和虚部 */
-	ptrue p7.b                     /* p7 = 全真谓词 */
-	index z0.d, #0, #1             /* z0 = [0, 1, 2, 3, ...] */
-	and z0.d, z0.d, #1             /* z0 = [0, 1, 0, 1, ...] */
-	cmpne p1.d, p7/z, z0.d, #0     /* p1 = odd lanes (虚部位置) */
-	not p0.b, p7/z, p1.b           /* p0 = even lanes (实部位置) */
-
-	/* 低半部分归约 */
-	and p7.b, p3/z, p3.b, p0.b     /* p7 = p3 AND p0,有效的实部 lane */
-	faddv d0, p7, z6.d             /* d0 = sum of z6[even lanes] */
-	fmov d1, x12                   /* d1 = 当前 sum_re */
-	fadd d0, d0, d1                /* d0 += sum_re */
-	fmov x12, d0                   /* x12 = 新的 sum_re */
-	and p7.b, p3/z, p3.b, p1.b     /* p7 = p3 AND p1,有效的虚部 lane */
-	faddv d0, p7, z6.d             /* d0 = sum of z6[odd lanes] */
-	fmov d1, x13                   /* d1 = 当前 sum_im */
-	fadd d0, d0, d1                /* d0 += sum_im */
-	fmov x13, d0                   /* x13 = 新的 sum_im */
-
-	/* 高半部分归约 */
-	and p7.b, p5/z, p5.b, p0.b     /* p7 = p5 AND p0,有效的实部 lane */
-	faddv d0, p7, z7.d             /* d0 = sum of z7[even lanes] */
-	fmov d1, x12                   /* d1 = 当前 sum_re */
-	fadd d0, d0, d1                /* d0 += sum_re */
-	fmov x12, d0                   /* x12 = 新的 sum_re */
-	and p7.b, p5/z, p5.b, p1.b     /* p7 = p5 AND p1,有效的虚部 lane */
-	faddv d0, p7, z7.d             /* d0 = sum of z7[odd lanes] */
-	fmov d1, x13                   /* d1 = 当前 sum_im */
-	fadd d0, d0, d1                /* d0 += sum_im */
-	fmov x13, d0                   /* x13 = 新的 sum_im */
+	zip1 z14.d, z12.d, z13.d     /* z14 = x[i] interleaved [re, im, ...] */
 
 	/* ===== 外积(逻辑下三角贡献): conj(a) * x[i], 仅 col > i (p4/p6 掩码) ===== */
 	/* 策略: 先对 val 取共轭(negate odd lanes),再用标准 fcmla #0/#90 复数乘法 */
@@ -218,6 +187,8 @@ spmv_standard:
 
 	/* 外积散射存储(逻辑下三角贡献): y[col] += conj(a) * x[i],仅 col > i (p4/p6 掩码) */
 	/* 存储上三角元素 A[i][col] 经共轭后贡献到逻辑下三角位置 y[col] */
+	mov z9.d, z8.d               /* z9 = col*2 */
+	add z9.d, z9.d, #1           /* z9 = col*2+1, 散射交错索引 */
 	/* 低半部分散射 */
 	zip1 z10.d, z8.d, z9.d         /* z10 = [col0*2, col0*2+1, col1*2, col1*2+1, ...] */
 	ld1d z14.d, p4/z, [x19, z10.d, lsl #3]  /* z14 = y[col],gather 加载当前值 */
@@ -235,17 +206,23 @@ spmv_standard:
 	b 5b                         /* 继续内层循环 */
 6:
 
-	/* 行结束: 将内积累加的 sum_re/sum_im 写回 y[i] */
-	/* 操作数据: y[i].re 和 y[i].im */
-	/* 目的: y[i] += 当前行所有 col >= i 的 a * x[col] 贡献之和 */
+	/* 行结束: 归约 z15(低半)/z11(高半) 累加器,写回 y[i] */
+	/* z15/z11 非活跃 lane 保持为 0,无需谓词掩码 */
+	ptrue p7.b                   /* p7 = 全真谓词 */
+	not p0.b, p7/z, p8.b         /* p0 = even lanes (实部位置) */
+	faddv d0, p0, z15.d          /* d0 = sum of z15 even lanes (低半 re) */
+	faddv d1, p0, z11.d          /* d1 = sum of z11 even lanes (高半 re) */
+	fadd d0, d0, d1              /* d0 = total sum_re */
 	add x10, x19, x6, lsl #4     /* x10 = &y[i],lsl #4 = *16 字节 */
 	ldr d4, [x10]                /* d4 = y[i].re 当前值 */
-	fmov d5, x12                 /* d5 = sum_re */
-	fadd d4, d4, d5              /* d4 += sum_re */
+	fadd d4, d4, d0              /* d4 += sum_re */
 	str d4, [x10]                /* 存储 y[i].re */
+	mov p7.b, p8.b               /* p7 = odd lanes (faddv 仅支持 p0-p7) */
+	faddv d0, p7, z15.d          /* d0 = sum of z15 odd lanes (低半 im) */
+	faddv d1, p7, z11.d          /* d1 = sum of z11 odd lanes (高半 im) */
+	fadd d0, d0, d1              /* d0 = total sum_im */
 	ldr d4, [x10, #8]            /* d4 = y[i].im 当前值 */
-	fmov d5, x13                 /* d5 = sum_im */
-	fadd d4, d4, d5              /* d4 += sum_im */
+	fadd d4, d4, d0              /* d4 += sum_im */
 	str d4, [x10, #8]            /* 存储 y[i].im */
 
 	/* 外层循环迭代 */
