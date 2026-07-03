@@ -42,7 +42,7 @@
  *   z0=i-bcast  z1=col_idx(64bit)  z2=val(lo)  z3=val(hi)
  *   z4=x[col](lo)  z5=x[i]-bcast  z6=x[col](hi)  z7=result(hi)
  *   z8=col*2  z9=col*2+1  z10=temp  z11=内积高半累加器
- *   z14=y[col]  z15=内积低半累加器
+ *   z14=temp  z15=内积低半累加器
  *   p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
  *   p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
  *   p7=temp  p8=odd-lanes(循环不变量,归约分离实虚部)
@@ -164,34 +164,27 @@ spmv_standard:
 	fcmla z11.d, p5/m, z3.d, z4.d, #0    /* z11 += val * x[col] (re*re, im*re) */
 	fcmla z11.d, p5/m, z3.d, z4.d, #90   /* z11 += rotated(-im, re) * x[col] */
 
-	/* ===== 外积(逻辑下三角贡献): conj(a) * x[i], 仅 col > i (p4/p6 掩码) ===== */
+	/* ===== 外积散射(逻辑下三角贡献): y[col] += conj(a) * x[i], 仅 col > i (p4/p6 掩码) ===== */
 	/* fcmla #0:   Zd.even += Zn1.even * Zn2.even (re*re) */
 	/*             Zd.odd  += Zn1.odd  * Zn2.even (im*re) */
 	/* fcmla #270: Zd.even += Zn1.odd  * Zn2.odd  (im*im) */
 	/*             Zd.odd  -= Zn1.even * Zn2.odd  (-re*im) */
 	/* 结果: even = re*re + im*im, odd = im*re - re*im = conj(a)*x */
-	mov z6.d, #0
-	fcmla z6.d, p4/m, z2.d, z5.d, #0    /* z6 = val * x[i] (re*re, im*re) */
-	fcmla z6.d, p4/m, z2.d, z5.d, #270  /* z6 += conj correction (im*im, -re*im) */
-	mov z7.d, #0
-	fcmla z7.d, p6/m, z3.d, z5.d, #0    /* z7 = val * x[i] (re*re, im*re) */
-	fcmla z7.d, p6/m, z3.d, z5.d, #270  /* z7 += conj correction (im*im, -re*im) */
-
-	/* 外积散射存储(逻辑下三角贡献): y[col] += conj(a) * x[i],仅 col > i (p4/p6 掩码) */
-	/* 存储上三角元素 A[i][col] 经共轭后贡献到逻辑下三角位置 y[col] */
+	/* 先加载 y[col] 到 z6/z7,fcmla 直接在其上累加,省去 fadd */
 	mov z9.d, z8.d               /* z9 = col*2 */
 	add z9.d, z9.d, #1           /* z9 = col*2+1, 散射交错索引 */
-	/* 低半部分散射 */
-	zip1 z10.d, z8.d, z9.d         /* z10 = [col0*2, col0*2+1, col1*2, col1*2+1, ...] */
-	ld1d z14.d, p4/z, [x19, z10.d, lsl #3]  /* z14 = y[col],gather 加载当前值 */
-	fadd z14.d, p4/m, z14.d, z6.d  /* z14 += z6(共轭乘法的低半结果) */
-	st1d z14.d, p4, [x19, z10.d, lsl #3]    /* 存储回 y[col] */
-
-	/* 高半部分散射 */
-	zip2 z10.d, z8.d, z9.d         /* z10 = 高半部分的索引 */
-	ld1d z14.d, p6/z, [x19, z10.d, lsl #3]  /* z14 = y[col],gather 加载 */
-	fadd z14.d, p6/m, z14.d, z7.d  /* z14 += z7(共轭乘法的高半结果) */
-	st1d z14.d, p6, [x19, z10.d, lsl #3]    /* 存储回 y[col] */
+	/* 低半部分 */
+	zip1 z10.d, z8.d, z9.d       /* z10 = [col0*2, col0*2+1, col1*2, col1*2+1, ...] */
+	ld1d z6.d, p4/z, [x19, z10.d, lsl #3]  /* z6 = y[col] 当前值 */
+	fcmla z6.d, p4/m, z2.d, z5.d, #0    /* z6 += val * x[i] (re*re, im*re) */
+	fcmla z6.d, p4/m, z2.d, z5.d, #270  /* z6 += conj correction (im*im, -re*im) */
+	st1d z6.d, p4, [x19, z10.d, lsl #3]  /* 存储回 y[col] */
+	/* 高半部分 */
+	zip2 z10.d, z8.d, z9.d       /* z10 = 高半部分的索引 */
+	ld1d z7.d, p6/z, [x19, z10.d, lsl #3]  /* z7 = y[col] 当前值 */
+	fcmla z7.d, p6/m, z3.d, z5.d, #0    /* z7 += val * x[i] (re*re, im*re) */
+	fcmla z7.d, p6/m, z3.d, z5.d, #270  /* z7 += conj correction (im*im, -re*im) */
+	st1d z7.d, p6, [x19, z10.d, lsl #3]  /* 存储回 y[col] */
 
 	/* 内层循环迭代 */
 	add x9, x9, x11              /* j += VL_doubles,前进到下一批非零元素 */
