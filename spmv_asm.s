@@ -170,21 +170,22 @@ spmv_standard:
 	/* fcmla #270: Zd.even += Zn1.odd  * Zn2.odd  (im*im) */
 	/*             Zd.odd  -= Zn1.even * Zn2.odd  (-re*im) */
 	/* 结果: even = re*re + im*im, odd = im*re - re*im = conj(a)*x */
-	/* 先加载 y[col] 到 z6/z7,fcmla 直接在其上累加,省去 fadd */
-	mov z9.d, z8.d               /* z9 = col*2 */
-	add z9.d, z9.d, #1           /* z9 = col*2+1, 散射交错索引 */
-	/* 低半部分 */
-	zip1 z10.d, z8.d, z9.d       /* z10 = [col0*2, col0*2+1, col1*2, col1*2+1, ...] */
-	ld1d z6.d, p4/z, [x19, z10.d, lsl #3]  /* z6 = y[col] 当前值 */
-	fcmla z6.d, p4/m, z2.d, z5.d, #0    /* z6 += val * x[i] (re*re, im*re) */
-	fcmla z6.d, p4/m, z2.d, z5.d, #270  /* z6 += conj correction (im*im, -re*im) */
-	st1d z6.d, p4, [x19, z10.d, lsl #3]  /* 存储回 y[col] */
-	/* 高半部分 */
-	zip2 z10.d, z8.d, z9.d       /* z10 = 高半部分的索引 */
-	ld1d z7.d, p6/z, [x19, z10.d, lsl #3]  /* z7 = y[col] 当前值 */
-	fcmla z7.d, p6/m, z3.d, z5.d, #0    /* z7 += val * x[i] (re*re, im*re) */
-	fcmla z7.d, p6/m, z3.d, z5.d, #270  /* z7 += conj correction (im*im, -re*im) */
-	st1d z7.d, p6, [x19, z10.d, lsl #3]  /* 存储回 y[col] */
+	/* gather y[col]: 共享偏移 z8(col*2), 双基址(x19 re, x10 im), 非交错谓词 p2 */
+	ld1d z6.d, p2/z, [x19, z8.d, lsl #3]  /* z6 = y[col].re, gather (p2: col>i) */
+	ld1d z7.d, p2/z, [x10, z8.d, lsl #3]  /* z7 = y[col].im, gather (p2: col>i) */
+	/* 低半部分: zip 交错后 fcmla 直接累加 */
+	zip1 z14.d, z6.d, z7.d       /* z14 = y[col] low, interleaved [re, im, ...] */
+	fcmla z14.d, p4/m, z2.d, z5.d, #0    /* z14 += val * x[i] (re*re, im*re) */
+	fcmla z14.d, p4/m, z2.d, z5.d, #270  /* z14 += conj correction (im*im, -re*im) */
+	/* 高半部分: zip 交错后 fcmla 直接累加 */
+	zip2 z10.d, z6.d, z7.d       /* z10 = y[col] high, interleaved */
+	fcmla z10.d, p6/m, z3.d, z5.d, #0
+	fcmla z10.d, p6/m, z3.d, z5.d, #270
+	/* scatter: 交错索引, p4/p6 分别写回 */
+	uzp1 z6.d, z14.d, z10.d        /* z6 = 低半交错索引 */
+	st1d z6.d, p4, [x19, z8.d, lsl #3]  /* scatter y[col] low */
+	uzp2 z7.d, z14.d, z10.d        /* z7 = 高半交错索引 */
+	st1d z7.d, p6, [x10, z8.d, lsl #3]  /* scatter y[col] high */
 
 	/* 内层循环迭代 */
 	add x9, x9, x11              /* j += VL_doubles,前进到下一批非零元素 */
