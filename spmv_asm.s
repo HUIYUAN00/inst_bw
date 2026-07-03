@@ -40,8 +40,8 @@
  *   q4/v4=vec[i](128bit)
  *   x19=y  x20=val  x21=vec  x22=rp  x23=ci  x24=dim
  *   z0=i-bcast  z1=col_idx(64bit)  z2=val(lo)  z3=val(hi)
- *   z4=x[col](lo)  z5=x[col](hi)  z6=result(lo)  z7=result(hi)
- *   z8=col*2  z9=col*2+1  z10=temp  z11=内积高半累加器  z12=xi_re-bcast  z13=xi_im-bcast
+ *   z4=x[col](lo)  z5=x[i]-bcast  z6=x[col](hi)  z7=result(hi)
+ *   z8=col*2  z9=col*2+1  z10=temp  z11=内积高半累加器
  *   z14=y[col]  z15=内积低半累加器
  *   p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
  *   p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
@@ -103,8 +103,7 @@ spmv_standard:
 	/* 操作数据: vec[i] = [re, im],128 位整体加载到 q4 */
 	add x10, x21, x6, lsl #4     /* x10 = &vec[i],lsl #4 = *16 字节(complex_double_t) */
 	ldr q4, [x10]                /* q4 = vec[i] = [re, im],128 位整体加载 */
-	dup z12.d, z4.d[0]           /* z12 = [xi_re, xi_re, ...],从 z4 lane 0 广播 */
-	dup z13.d, z4.d[1]           /* z13 = [xi_im, xi_im, ...],从 z4 lane 1 广播 */
+	mov z5.q, q4                 /* z5 = x[i] interleaved [re, im, re, im, ...], 持久广播 */
 
 	/* 初始化累加器 */
 	mov z15.d, #0                /* z15 = 内积低半累加器 [re, im, ...], 初始为 0 */
@@ -149,9 +148,9 @@ spmv_standard:
 	lsl z8.d, z1.d, #1           /* z8 = col*2, vec[col] 的 double 索引 */
 	add x10, x21, #8             /* x10 = &vec[0].im, 虚部基址 */
 	ld1d z4.d, p1/z, [x21, z8.d, lsl #3]  /* z4 = vec[col].re, gather load (p1: col>=i) */
-	ld1d z5.d, p1/z, [x10, z8.d, lsl #3]  /* z5 = vec[col].im, gather load (p1: col>=i) */
-	zip1 z10.d, z4.d, z5.d       /* z10 = x[col] low, interleaved [re, im, ...] */
-	zip2 z4.d, z4.d, z5.d        /* z4 = x[col] high, interleaved [re, im, ...] */
+	ld1d z6.d, p1/z, [x10, z8.d, lsl #3]  /* z6 = vec[col].im, gather load (p1: col>=i) */
+	zip1 z10.d, z4.d, z6.d       /* z10 = x[col] low, interleaved [re, im, ...] */
+	zip2 z4.d, z4.d, z6.d        /* z4 = x[col] high, interleaved [re, im, ...] */
 
 	/* ===== 内积: a * x[col], fcmla 复数乘法, 仅 col >= i (p3/p5 掩码) ===== */
 	/* fcmla #0:  Zd.even += Zn1.even * Zn2.even (re*re) */
@@ -165,8 +164,6 @@ spmv_standard:
 	fcmla z11.d, p5/m, z3.d, z4.d, #0    /* z11 += val * x[col] (re*re, im*re) */
 	fcmla z11.d, p5/m, z3.d, z4.d, #90   /* z11 += rotated(-im, re) * x[col] */
 
-	zip1 z14.d, z12.d, z13.d     /* z14 = x[i] interleaved [re, im, ...] */
-
 	/* ===== 外积(逻辑下三角贡献): conj(a) * x[i], 仅 col > i (p4/p6 掩码) ===== */
 	/* 策略: 先对 val 取共轭(negate odd lanes),再用标准 fcmla #0/#90 复数乘法 */
 	/* fneg:       z2/z3 odd lanes 取反 → conj(val) = (a.re, -a.im) */
@@ -179,11 +176,11 @@ spmv_standard:
 	fneg z2.d, p7/m, z2.d               /* z2 = conj(val) low half */
 	fneg z3.d, p7/m, z3.d               /* z3 = conj(val) high half */
 	mov z6.d, #0
-	fcmla z6.d, p4/m, z2.d, z14.d, #0    /* z6 = conj(val) * x[i] (re*re, -im*re) */
-	fcmla z6.d, p4/m, z2.d, z14.d, #90   /* z6 += rotated(im, re) * x[i] */
+	fcmla z6.d, p4/m, z2.d, z5.d, #0    /* z6 = conj(val) * x[i] (re*re, -im*re) */
+	fcmla z6.d, p4/m, z2.d, z5.d, #90   /* z6 += rotated(im, re) * x[i] */
 	mov z7.d, #0
-	fcmla z7.d, p6/m, z3.d, z14.d, #0    /* z7 = conj(val) * x[i] (re*re, -im*re) */
-	fcmla z7.d, p6/m, z3.d, z14.d, #90   /* z7 += rotated(im, re) * x[i] */
+	fcmla z7.d, p6/m, z3.d, z5.d, #0    /* z7 = conj(val) * x[i] (re*re, -im*re) */
+	fcmla z7.d, p6/m, z3.d, z5.d, #90   /* z7 += rotated(im, re) * x[i] */
 
 	/* 外积散射存储(逻辑下三角贡献): y[col] += conj(a) * x[i],仅 col > i (p4/p6 掩码) */
 	/* 存储上三角元素 A[i][col] 经共轭后贡献到逻辑下三角位置 y[col] */
