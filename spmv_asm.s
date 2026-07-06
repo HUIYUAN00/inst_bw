@@ -183,9 +183,9 @@ spmv_standard:
 	fcmla z10.d, p6/m, z3.d, z5.d, #270
 	/* scatter: 交错索引, p4/p6 分别写回 */
 	uzp1 z6.d, z14.d, z10.d        /* z6 = 低半交错索引 */
-	st1d z6.d, p4, [x19, z8.d, lsl #3]  /* scatter y[col] low */
+	st1d z6.d, p2, [x19, z8.d, lsl #3]  /* scatter y[col] low */
 	uzp2 z7.d, z14.d, z10.d        /* z7 = 高半交错索引 */
-	st1d z7.d, p6, [x10, z8.d, lsl #3]  /* scatter y[col] high */
+	st1d z7.d, p2, [x10, z8.d, lsl #3]  /* scatter y[col] high */
 
 	/* 内层循环迭代 */
 	add x9, x9, x11              /* j += VL_doubles,前进到下一批非零元素 */
