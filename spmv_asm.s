@@ -153,26 +153,16 @@ spmv_standard:
 	zip2 z4.d, z4.d, z6.d        /* z4 = x[col] high, interleaved [re, im, ...] */
 
 	/* ===== 内积: a * x[col], fcmla 复数乘法, 仅 col >= i (p3/p5 掩码) ===== */
-	/* fcmla #0:  Zd.even += Zn1.even * Zn2.even (re*re) */
-	/*            Zd.odd  += Zn1.odd  * Zn2.even (im*re) */
-	/* fcmla #90: Zd.even -= Zn1.odd  * Zn2.odd  (-im*im) */
-	/*            Zd.odd  += Zn1.even * Zn2.odd  (re*im) */
-	/* 结果: even = re*re - im*im, odd = im*re + re*im */
-	/* 直接累加到 z15(低半)/z11(高半),p3/p5 互斥,无需每次清零 */
-	fcmla z15.d, p3/m, z2.d, z10.d, #0   /* z15 += val * x[col] (re*re, im*re) */
-	fcmla z15.d, p3/m, z2.d, z10.d, #90  /* z15 += rotated(-im, re) * x[col] */
-	fcmla z11.d, p5/m, z3.d, z4.d, #0    /* z11 += val * x[col] (re*re, im*re) */
-	fcmla z11.d, p5/m, z3.d, z4.d, #90   /* z11 += rotated(-im, re) * x[col] */
+	fcmla z15.d, p3/m, z2.d, z10.d, #0
+	fcmla z15.d, p3/m, z2.d, z10.d, #90
+	fcmla z11.d, p5/m, z3.d, z4.d, #0
+	fcmla z11.d, p5/m, z3.d, z4.d, #90
 
 	/* ===== 外积散射(逻辑下三角贡献): y[col] += conj(a) * x[i], 仅 col > i (p4/p6 掩码) ===== */
-	/* fcmla #0:   Zd.even += Zn1.even * Zn2.even (re*re) */
-	/*             Zd.odd  += Zn1.odd  * Zn2.even (im*re) */
-	/* fcmla #270: Zd.even += Zn1.odd  * Zn2.odd  (im*im) */
-	/*             Zd.odd  -= Zn1.even * Zn2.odd  (-re*im) */
-	/* 结果: even = re*re + im*im, odd = im*re - re*im = conj(a)*x */
-	/* gather y[col]: 共享偏移 z8(col*2), 双基址(x19 re, x10 im), 非交错谓词 p2 */
-	ld1d z6.d, p2/z, [x19, z8.d, lsl #3]  /* z6 = y[col].re, gather (p2: col>i) */
-	ld1d z7.d, p2/z, [x10, z8.d, lsl #3]  /* z7 = y[col].im, gather (p2: col>i) */
+	/* gather y[col]: re 用 x19 基址, im 用 x19+8 */
+	ld1d z6.d, p2/z, [x19, z8.d, lsl #3]  /* z6 = y[col].re */
+	add x10, x19, #8             /* x10 = &y[0].im (注意: 是 y 不是 vec!) */
+	ld1d z7.d, p2/z, [x10, z8.d, lsl #3]  /* z7 = y[col].im */
 	/* 低半部分: zip 交错后 fcmla 直接累加 */
 	zip1 z14.d, z6.d, z7.d       /* z14 = y[col] low, interleaved [re, im, ...] */
 	fcmla z14.d, p4/m, z2.d, z5.d, #0    /* z14 += val * x[i] (re*re, im*re) */

@@ -220,6 +220,60 @@ static int run_test(int matrix_dim, uint64_t *row_ptr, int32_t *col_idx,
     return errors;
 }
 
+static int test_known_2x2(void) {
+    int dim = 2;
+    uint64_t row_ptr[3] = {0, 2, 4};
+    int32_t col_idx[4] = {0, 1, 0, 1};
+    complex_double_t values[4] = {{1.0, 0.0}, {1.0, 1.0}, {1.0, -1.0}, {2.0, 0.0}};
+    complex_double_t vector[2] = {{1.0, 0.0}, {0.0, 1.0}};
+    complex_double_t result[2], result_ref[2];
+
+    hermitian_spmv_scalar(result_ref, values, vector, row_ptr, col_idx, dim);
+    spmv_standard(result, values, vector, row_ptr, col_idx, dim);
+
+    printf("[known-2x2] ref: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
+           result_ref[0].re, result_ref[0].im, result_ref[1].re, result_ref[1].im);
+    printf("[known-2x2] asm: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
+           result[0].re, result[0].im, result[1].re, result[1].im);
+
+    int errors = 0;
+    for (int i = 0; i < dim; i++) {
+        if (fabs(result[i].re - result_ref[i].re) > 1e-9 ||
+            fabs(result[i].im - result_ref[i].im) > 1e-9) errors++;
+    }
+    printf("[known-2x2] %s\n", errors ? "FAIL" : "PASS");
+
+    /* Test 2: off-diagonal only */
+    complex_double_t values2[4] = {{0.0, 0.0}, {1.0, 1.0}, {1.0, -1.0}, {0.0, 0.0}};
+    complex_double_t result2[2], result2_ref[2];
+    hermitian_spmv_scalar(result2_ref, values2, vector, row_ptr, col_idx, dim);
+    spmv_standard(result2, values2, vector, row_ptr, col_idx, dim);
+    printf("[off-diag]  ref: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
+           result2_ref[0].re, result2_ref[0].im, result2_ref[1].re, result2_ref[1].im);
+    printf("[off-diag]  asm: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
+           result2[0].re, result2[0].im, result2[1].re, result2[1].im);
+    for (int i = 0; i < dim; i++) {
+        if (fabs(result2[i].re - result2_ref[i].re) > 1e-9 ||
+            fabs(result2[i].im - result2_ref[i].im) > 1e-9) errors++;
+    }
+
+    /* Test 3: diagonal only */
+    complex_double_t values3[4] = {{3.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}, {5.0, 0.0}};
+    complex_double_t result3[2], result3_ref[2];
+    hermitian_spmv_scalar(result3_ref, values3, vector, row_ptr, col_idx, dim);
+    spmv_standard(result3, values3, vector, row_ptr, col_idx, dim);
+    printf("[diag-only] ref: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
+           result3_ref[0].re, result3_ref[0].im, result3_ref[1].re, result3_ref[1].im);
+    printf("[diag-only] asm: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
+           result3[0].re, result3[0].im, result3[1].re, result3[1].im);
+    for (int i = 0; i < dim; i++) {
+        if (fabs(result3[i].re - result3_ref[i].re) > 1e-9 ||
+            fabs(result3[i].im - result3_ref[i].im) > 1e-9) errors++;
+    }
+
+    return errors;
+}
+
 static int test_dense_seq(int matrix_dim) {
     char label[64];
     snprintf(label, sizeof(label), "dense-rand01 n=%d", matrix_dim);
@@ -279,7 +333,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (dense_seq) {
-        int total_errors = 0;
+        int total_errors = test_known_2x2();
         int dims[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
                       21, 23, 25, 27, 29, 30, 31, 32, 33, 35, 37, 40, 43, 47, 50, 53, 57,
                       60, 63, 64, 65, 67, 70, 73, 77, 80, 83, 87, 90, 93, 97, 100};

@@ -55,194 +55,136 @@ static inline double get_mflops(uint64_t flops, double time_sec) {
  *
  * SVE内嵌汇编实现 (fcmla + zip):
  *   寄存器分配:
- *     x6=i  x7=row_start  x8=row_end  x9=j  x10=temp  x11=VL_doubles
- *     x12=sum_re  x13=sum_im  x14=xi_re(bits)  x15=xi_im(bits)
- *     z0=索引/i广播  z1=col_idx(64bit)  z2=a_re  z3=a_im
- *     z4=xj_re  z5=xj_im  z6=fcmla结果(低)  z7=fcmla结果(高)
- *     z8=col*2  z9=col*2+1  z10=j*2/复用  z11=j*2+1/复用
- *     z12=xi_re广播  z13=xi_im广播  z14=y[col]  z15=复用
- *     p0=循环/归约p_re  p1=col>=i/归约p_im  p2=col>i
+ *     x6=i  x7=row_start  x8=row_end  x9=j  x10=unused  x11=VL_doubles
+ *     x14=地址计算临时寄存器
+ *     q4=vec[i](128bit)
+ *     z0=i-bcast  z1=col_idx(64bit)  z2=val(lo)  z3=val(hi)
+ *     z4=x[col](lo)  z5=x[i]-bcast  z6=x[col](hi)/temp  z7=result(hi)
+ *     z8=col*2  z9=unused  z10=temp  z11=内积高半累加器
+ *     z14=temp  z15=内积低半累加器
+ *     p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
  *     p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
- *     p7=临时 */
+ *     p7=temp  p8=odd-lanes(循环不变量,归约分离实虚部) */
 static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, double scalar) {
     (void)size;
     (void)scalar;
 
     __asm__ __volatile__ (
-        /* ===== Phase 1: 清零 y[0..2*matrix_dim) 个 double ===== */
+        "stp x19, x20, [sp, #-80]!\n\t"
+        "stp x21, x22, [sp, #16]\n\t"
+        "stp x23, x24, [sp, #32]\n\t"
+        "stp x29, x30, [sp, #48]\n\t"
+        "str x14, [sp, #64]\n\t"
+        "mov x19, %[y]\n\t"
+        "mov x20, %[val]\n\t"
+        "mov x21, %[vec]\n\t"
+        "mov x22, %[rp]\n\t"
+        "mov x23, %[ci]\n\t"
+        "mov x24, %[dim]\n\t"
         "mov x6, #0\n\t"
-        "lsl x7, %[dim], #1\n\t"
+        "lsl x7, x24, #1\n\t"
         "rdvl x11, #1\n\t"
         "lsr x11, x11, #3\n\t"
         "1:\n\t"
         "whilelt p1.d, x6, x7\n\t"
         "beq 2f\n\t"
         "mov z1.d, #0\n\t"
-        "st1d z1.d, p1, [%[y], x6, lsl #3]\n\t"
+        "st1d z1.d, p1, [x19, x6, lsl #3]\n\t"
         "add x6, x6, x11\n\t"
         "b 1b\n\t"
         "2:\n\t"
-
-        /* ===== Phase 2: 主 hemv 循环 ===== */
+        "ptrue p7.b\n\t"
+        "index z0.d, #0, #1\n\t"
+        "and z0.d, z0.d, #1\n\t"
+        "cmpne p8.d, p7/z, z0.d, #0\n\t"
         "mov x6, #0\n\t"
         "3:\n\t"
-        "cmp x6, %[dim]\n\t"
+        "cmp x6, x24\n\t"
         "bge 4f\n\t"
-
-        /* 加载 row_ptr[i], row_ptr[i+1] */
-        "add x10, %[rp], x6, lsl #3\n\t"
-        "ldr x7, [x10]\n\t"
-        "ldr x8, [x10, #8]\n\t"
-
-        /* 加载 vec[i].re, vec[i].im，保存位模式到 GPR */
-        "add x10, %[vec], x6, lsl #4\n\t"
-        "ldr d0, [x10]\n\t"
-        "ldr d1, [x10, #8]\n\t"
-        "fmov x14, d0\n\t"
-        "fmov x15, d1\n\t"
-
-        /* 初始化 sum_re=0, sum_im=0 */
-        "mov x12, #0\n\t"
-        "mov x13, #0\n\t"
-
-        /* ----- 内层循环: j = row_start ----- */
+        "add x14, x22, x6, lsl #3\n\t"
+        "ldr x7, [x14]\n\t"
+        "ldr x8, [x14, #8]\n\t"
+        "add x14, x21, x6, lsl #4\n\t"
+        "ldr q4, [x14]\n\t"
+        "mov z5.q, q4\n\t"
+        "mov z15.d, #0\n\t"
+        "mov z11.d, #0\n\t"
         "mov x9, x7\n\t"
         "5:\n\t"
         "cmp x9, x8\n\t"
         "bge 6f\n\t"
-
-        /* 创建索引向量，计算 val 偏移，收集 col_idx */
-        "index z0.d, x9, #1\n\t"
-        "lsl z10.d, z0.d, #1\n\t"
-        "mov z11.d, z10.d\n\t"
-        "add z11.d, z11.d, #1\n\t"
+        "add x14, x23, x9, lsl #2\n\t"
         "whilelt p0.d, x9, x8\n\t"
-        "ld1sw z1.d, p0/z, [%[ci], z0.d, lsl #2]\n\t"
-
-        /* 广播 i，创建谓词 p1=col>=i, p2=col>i */
+        "ld1sw z1.d, p0/z, [x14]\n\t"
+        "add x14, x20, x9, lsl #4\n\t"
         "dup z0.d, x6\n\t"
         "cmpge p1.d, p0/z, z1.d, z0.d\n\t"
         "cmpgt p2.d, p0/z, z1.d, z0.d\n\t"
-
-        /* zip 谓词用于 fcmla: 每个复数值扩展为 re/im 两个通道 */
         "zip1 p3.d, p1.d, p1.d\n\t"
         "zip2 p5.d, p1.d, p1.d\n\t"
         "zip1 p4.d, p2.d, p2.d\n\t"
         "zip2 p6.d, p2.d, p2.d\n\t"
-
-        /* 收集 val[j].re, val[j].im */
-        "ld1d z2.d, p1/z, [%[val], z10.d, lsl #3]\n\t"
-        "ld1d z3.d, p1/z, [%[val], z11.d, lsl #3]\n\t"
-
-        /* vec 偏移: col*2, col*2+1 */
+        "ld1d z2.d, p3/z, [x14]\n\t"
+        "add x14, x14, x11, lsl #3\n\t"
+        "ld1d z3.d, p5/z, [x14]\n\t"
         "lsl z8.d, z1.d, #1\n\t"
-        "mov z9.d, z8.d\n\t"
-        "add z9.d, z9.d, #1\n\t"
-
-        /* 收集 vec[col].re, vec[col].im */
-        "ld1d z4.d, p1/z, [%[vec], z8.d, lsl #3]\n\t"
-        "ld1d z5.d, p1/z, [%[vec], z9.d, lsl #3]\n\t"
-
-        /* --- 复数乘法: prod = a * x[col] (使用 fmla 手动实现) --- */
-        /* 输入: z2=val[j].re, z3=val[j].im, z4=vec[col].re, z5=vec[col].im */
-        /* 输出: z6=[re,im,re,im,...] (低半), z7=[re,im,re,im,...] (高半) */
-        
-        /* 计算: re = a_re*x_re - a_im*x_im, im = a_re*x_im + a_im*x_re */
-        "fmul z6.d, z2.d, z4.d\n\t"      // z6 = a_re * x_re
-        "fmls z6.d, p1/m, z3.d, z5.d\n\t"  // z6 -= a_im * x_im
-        "fmul z7.d, z2.d, z5.d\n\t"      // z7 = a_re * x_im
-        "fmla z7.d, p1/m, z3.d, z4.d\n\t"  // z7 += a_im * x_re
-        
-        /* 低半: 交错 [re, im, re, im, ...] */
-        "zip1 z10.d, z6.d, z7.d\n\t"
-        /* 高半 */
-        "zip2 z7.d, z6.d, z7.d\n\t"
-        "mov z6.d, z10.d\n\t"
-
-        /* --- 归约: 创建 p0=p_re, p1=p_im (faddv 仅接受 p0-p7) --- */
-        "ptrue p7.b\n\t"
-        "index z0.d, #0, #1\n\t"
-        "and z0.d, z0.d, #1\n\t"
-        "cmpeq p1.d, p7/z, z0.d, #1\n\t"
-        "not p0.b, p7/z, p1.b\n\t"
-        /* 低半归约 */
-        "and p7.b, p3/z, p3.b, p0.b\n\t"
-        "faddv d0, p7, z6.d\n\t"
-        "fmov d1, x12\n\t"
-        "fadd d0, d0, d1\n\t"
-        "fmov x12, d0\n\t"
-        "and p7.b, p3/z, p3.b, p1.b\n\t"
-        "faddv d0, p7, z6.d\n\t"
-        "fmov d1, x13\n\t"
-        "fadd d0, d0, d1\n\t"
-        "fmov x13, d0\n\t"
-        /* 高半归约 */
-        "and p7.b, p5/z, p5.b, p0.b\n\t"
-        "faddv d0, p7, z7.d\n\t"
-        "fmov d1, x12\n\t"
-        "fadd d0, d0, d1\n\t"
-        "fmov x12, d0\n\t"
-        "and p7.b, p5/z, p5.b, p1.b\n\t"
-        "faddv d0, p7, z7.d\n\t"
-        "fmov d1, x13\n\t"
-        "fadd d0, d0, d1\n\t"
-        "fmov x13, d0\n\t"
-
-        /* --- 共轭乘法: conj(a) * x[i] (使用 fmla 手动实现) --- */
-        /* conj(a) * x[i] = (a_re*xi_re + a_im*xi_im) + i*(a_re*xi_im - a_im*xi_re) */
-        "dup z12.d, x14\n\t"  // xi_re
-        "dup z13.d, x15\n\t"  // xi_im
-        
-        /* 计算: re = a_re*xi_re + a_im*xi_im, im = a_re*xi_im - a_im*xi_re */
-        "fmul z6.d, z2.d, z12.d\n\t"     // z6 = a_re * xi_re
-        "fmla z6.d, p2/m, z3.d, z13.d\n\t"  // z6 += a_im * xi_im
-        "fmul z10.d, z2.d, z13.d\n\t"    // z10 = a_re * xi_im
-        "fmls z10.d, p2/m, z3.d, z12.d\n\t"  // z10 -= a_im * xi_re
-        
-        /* 低半: 交错 [re, im, re, im, ...] */
-        "zip1 z11.d, z6.d, z10.d\n\t"
-        /* 高半 */
-        "zip2 z7.d, z6.d, z10.d\n\t"
-        "mov z6.d, z11.d\n\t"
-
-        /* gather y[col], fadd, scatter store (低半) */
-        "zip1 z10.d, z8.d, z9.d\n\t"
-        "ld1d z14.d, p4/z, [%[y], z10.d, lsl #3]\n\t"
-        "fadd z14.d, p4/m, z14.d, z6.d\n\t"
-        "st1d z14.d, p4, [%[y], z10.d, lsl #3]\n\t"
-        /* gather y[col], fadd, scatter store (高半) */
-        "zip2 z10.d, z8.d, z9.d\n\t"
-        "ld1d z14.d, p6/z, [%[y], z10.d, lsl #3]\n\t"
-        "fadd z14.d, p6/m, z14.d, z7.d\n\t"
-        "st1d z14.d, p6, [%[y], z10.d, lsl #3]\n\t"
-
-        /* j += VL_doubles */
+        "add x14, x21, #8\n\t"
+        "ld1d z4.d, p1/z, [x21, z8.d, lsl #3]\n\t"
+        "ld1d z6.d, p1/z, [x14, z8.d, lsl #3]\n\t"
+        "zip1 z10.d, z4.d, z6.d\n\t"
+        "zip2 z4.d, z4.d, z6.d\n\t"
+        "fcmla z15.d, p3/m, z2.d, z10.d, #0\n\t"
+        "fcmla z15.d, p3/m, z2.d, z10.d, #90\n\t"
+        "fcmla z11.d, p5/m, z3.d, z4.d, #0\n\t"
+        "fcmla z11.d, p5/m, z3.d, z4.d, #90\n\t"
+        "ld1d z6.d, p2/z, [x19, z8.d, lsl #3]\n\t"
+        "add x14, x19, #8\n\t"
+        "ld1d z7.d, p2/z, [x14, z8.d, lsl #3]\n\t"
+        "zip1 z14.d, z6.d, z7.d\n\t"
+        "fcmla z14.d, p4/m, z2.d, z5.d, #0\n\t"
+        "fcmla z14.d, p4/m, z2.d, z5.d, #270\n\t"
+        "zip2 z10.d, z6.d, z7.d\n\t"
+        "fcmla z10.d, p6/m, z3.d, z5.d, #0\n\t"
+        "fcmla z10.d, p6/m, z3.d, z5.d, #270\n\t"
+        "uzp1 z6.d, z14.d, z10.d\n\t"
+        "st1d z6.d, p2, [x19, z8.d, lsl #3]\n\t"
+        "uzp2 z7.d, z14.d, z10.d\n\t"
+        "st1d z7.d, p2, [x14, z8.d, lsl #3]\n\t"
         "add x9, x9, x11\n\t"
         "b 5b\n\t"
         "6:\n\t"
-
-        /* y[i].re += sum_re, y[i].im += sum_im */
-        "add x10, %[y], x6, lsl #4\n\t"
-        "ldr d4, [x10]\n\t"
-        "fmov d5, x12\n\t"
-        "fadd d4, d4, d5\n\t"
-        "str d4, [x10]\n\t"
-        "ldr d4, [x10, #8]\n\t"
-        "fmov d5, x13\n\t"
-        "fadd d4, d4, d5\n\t"
-        "str d4, [x10, #8]\n\t"
-        /* i++ */
+        "ptrue p7.b\n\t"
+        "not p0.b, p7/z, p8.b\n\t"
+        "faddv d0, p0, z15.d\n\t"
+        "faddv d1, p0, z11.d\n\t"
+        "fadd d0, d0, d1\n\t"
+        "add x14, x19, x6, lsl #4\n\t"
+        "ldr d4, [x14]\n\t"
+        "fadd d4, d4, d0\n\t"
+        "str d4, [x14]\n\t"
+        "mov p7.b, p8.b\n\t"
+        "faddv d0, p7, z15.d\n\t"
+        "faddv d1, p7, z11.d\n\t"
+        "fadd d0, d0, d1\n\t"
+        "ldr d4, [x14, #8]\n\t"
+        "fadd d4, d4, d0\n\t"
+        "str d4, [x14, #8]\n\t"
         "add x6, x6, #1\n\t"
         "b 3b\n\t"
         "4:\n\t"
-
+        "ldr x14, [sp, #64]\n\t"
+        "ldp x29, x30, [sp, #48]\n\t"
+        "ldp x23, x24, [sp, #32]\n\t"
+        "ldp x21, x22, [sp, #16]\n\t"
+        "ldp x19, x20, [sp], #80\n\t"
         : /* no outputs */
         : [y] "r"(result_ptr), [val] "r"(values_ptr), [vec] "r"(vector_ptr),
           [rp] "r"(row_ptr), [ci] "r"(col_idx), [dim] "r"(matrix_dim)
-        : "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+        : "x6", "x7", "x8", "x9", "x10", "x11", "x14",
+          "x19", "x20", "x21", "x22", "x23", "x24",
           "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
           "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15",
-          "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7",
+          "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8",
           "memory", "cc"
     );
 }
