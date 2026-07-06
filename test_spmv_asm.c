@@ -222,7 +222,7 @@ static int run_test(int matrix_dim, uint64_t *row_ptr, int32_t *col_idx,
 
 static int test_dense_seq(int matrix_dim) {
     char label[64];
-    snprintf(label, sizeof(label), "dense-rand n=%d", matrix_dim);
+    snprintf(label, sizeof(label), "dense-rand01 n=%d", matrix_dim);
 
     uint64_t nnz = (uint64_t)matrix_dim * matrix_dim;
     uint64_t *row_ptr = (uint64_t *)malloc((matrix_dim + 1) * sizeof(uint64_t));
@@ -246,7 +246,7 @@ static int test_dense_seq(int matrix_dim) {
 
     for (int i = 0; i < matrix_dim; i++) {
         for (int j = i; j < matrix_dim; j++) {
-            double v = (double)(rand() % 32 + 1);
+            double v = (double)rand() / RAND_MAX;
             values[i * matrix_dim + j].re = v;
             values[i * matrix_dim + j].im = 0.0;
             values[j * matrix_dim + i].re = v;
@@ -255,7 +255,7 @@ static int test_dense_seq(int matrix_dim) {
     }
 
     for (int i = 0; i < matrix_dim; i++) {
-        vector[i].re = (double)(rand() % 32 + 1);
+        vector[i].re = (double)rand() / RAND_MAX;
         vector[i].im = 0.0;
     }
 
@@ -293,7 +293,7 @@ int main(int argc, char *argv[]) {
                 total_errors += test_dense_seq(dims[t]);
             }
         }
-        printf("\nDense random(1-32): %d/%d tests passed\n", total_tests - total_errors, total_tests);
+        printf("\nDense random(0-1): %d/%d tests passed\n", total_tests - total_errors, total_tests);
         return total_errors > 0 ? 1 : 0;
     }
 
