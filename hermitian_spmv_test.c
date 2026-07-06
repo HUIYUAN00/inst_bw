@@ -81,18 +81,8 @@ static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, 
         "mov x22, %[rp]\n\t"
         "mov x23, %[ci]\n\t"
         "mov x24, %[dim]\n\t"
-        "mov x6, #0\n\t"
-        "lsl x7, x24, #1\n\t"
         "rdvl x11, #1\n\t"
         "lsr x11, x11, #3\n\t"
-        "1:\n\t"
-        "whilelt p1.d, x6, x7\n\t"
-        "beq 2f\n\t"
-        "mov z1.d, #0\n\t"
-        "st1d z1.d, p1, [x19, x6, lsl #3]\n\t"
-        "add x6, x6, x11\n\t"
-        "b 1b\n\t"
-        "2:\n\t"
         "ptrue p7.b\n\t"
         "index z0.d, #0, #1\n\t"
         "and z0.d, z0.d, #1\n\t"
@@ -196,11 +186,6 @@ static void hermitian_spmv_scalar(void *result_ptr, void *values_ptr, void *vect
     complex_double_t *val = (complex_double_t *)values_ptr;
     complex_double_t *vec = (complex_double_t *)vector_ptr;
     complex_double_t *y = (complex_double_t *)result_ptr;
-    
-    for (uint64_t i = 0; i < matrix_dim; i++) {
-        y[i].re = 0.0;
-        y[i].im = 0.0;
-    }
     
     for (uint64_t i = 0; i < matrix_dim; i++) {
         for (uint64_t j = row_ptr[i]; j < row_ptr[i + 1]; j++) {
@@ -449,8 +434,8 @@ int main(int argc, char *argv[]) {
     for (uint64_t i = 0; i < matrix_dim; i++) {
         result[i].re = (double)rand() / RAND_MAX;
         result[i].im = (double)rand() / RAND_MAX;
-        result_ref[i].re = (double)rand() / RAND_MAX;
-        result_ref[i].im = (double)rand() / RAND_MAX;
+        result_ref[i].re = result[i].re;
+        result_ref[i].im = result[i].im;
     }
     
     /* 生成随机输入向量 */
