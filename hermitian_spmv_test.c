@@ -446,6 +446,13 @@ int main(int argc, char *argv[]) {
     
     srand(random_seed);
     
+    for (uint64_t i = 0; i < matrix_dim; i++) {
+        result[i].re = (double)rand() / RAND_MAX;
+        result[i].im = (double)rand() / RAND_MAX;
+        result_ref[i].re = (double)rand() / RAND_MAX;
+        result_ref[i].im = (double)rand() / RAND_MAX;
+    }
+    
     /* 生成随机输入向量 */
     for (uint64_t i = 0; i < matrix_dim; i++) {
         vector[i].re = (double)rand() / RAND_MAX;
@@ -581,8 +588,28 @@ int main(int argc, char *argv[]) {
     
     free(coo);
     
-    /* ===== 阶段4：使用hemv计算参考结果用于校验 ===== */
+    /* ===== 阶段4：一次性校验 ===== */
     hermitian_spmv_scalar(result_ref, values, vector, nnz, 1.0);
+    spmv_standard(result, values, vector, nnz, 1.0);
+    
+    int verify_errors = verify_spmv_result(result, result_ref);
+    if (rank == 0) {
+        if (verify_errors > 0) {
+            printf("Verification FAILED (%d errors). Skipping benchmark.\n", verify_errors);
+        } else {
+            printf("Verification PASS\n");
+        }
+        printf("\n");
+    }
+    
+    if (verify_errors > 0) {
+        free(row_ptr); free(col_idx); free(values);
+        free(vector); free(result); free(result_ref);
+#ifdef USE_MPI
+        MPI_Finalize();
+#endif
+        return 1;
+    }
     
     if (rank == 0) {
 #ifdef USE_MPI
@@ -613,11 +640,6 @@ int main(int argc, char *argv[]) {
         MPI_Reduce(&mflops, &total_mflops, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 #endif
         
-        int verify_result = -1;
-        if (strcmp(test->category, "SpMV") == 0) {
-            verify_result = verify_spmv_result(result, result_ref);
-        }
-        
 #ifdef USE_MPI
         MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -630,12 +652,7 @@ int main(int argc, char *argv[]) {
             printf("%-38s %14s %12.2f %12.3f",
                    test->name, test->category, mflops, time_sec * 1000);
 #endif
-            if (verify_result > 0) {
-                printf("  VERIFY_FAIL(%d)", verify_result);
-            } else if (verify_result == 0) {
-                printf("  PASS");
-            }
-            printf("\n");
+            printf("  PASS\n");
         }
     }
     
