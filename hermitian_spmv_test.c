@@ -21,6 +21,9 @@ typedef struct {
     double im;
 } complex_double_t;
 
+static complex_double_t alpha = {1.0, 0.0};
+static complex_double_t beta = {0.5, 0.0};
+
 static uint64_t *row_ptr = NULL;
 static int32_t *col_idx = NULL;
 static complex_double_t *values = NULL;
@@ -49,6 +52,26 @@ static inline double get_mflops(uint64_t flops, double time_sec) {
     return (double)flops / time_sec / 1e6;
 }
 
+static void scale_result(void *result_ptr, complex_double_t s) {
+    complex_double_t *y = (complex_double_t *)result_ptr;
+    for (uint64_t i = 0; i < matrix_dim; i++) {
+        double re = s.re * y[i].re - s.im * y[i].im;
+        double im = s.re * y[i].im + s.im * y[i].re;
+        y[i].re = re;
+        y[i].im = im;
+    }
+}
+
+static complex_double_t parse_complex(const char *str) {
+    complex_double_t z = {0.0, 0.0};
+    char *endptr;
+    z.re = strtod(str, &endptr);
+    if (endptr && *endptr == ',') {
+        z.im = strtod(endptr + 1, &endptr);
+    }
+    return z;
+}
+
 /* hemv计算：利用Hermitian性质，仅扫描上三角部分(col>=row)，
  * 对角线直接乘，非对角线额外通过共轭对称性累加到 y[col]。
  * conj(a)*x = (a.re*x.re + a.im*x.im) + (a.re*x.im - a.im*x.re)i
@@ -65,9 +88,9 @@ static inline double get_mflops(uint64_t flops, double time_sec) {
  *     p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
  *     p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
  *     p7=temp  p8=odd-lanes(循环不变量,归约分离实虚部) */
-static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, double scalar) {
+static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, complex_double_t alpha) {
     (void)size;
-    (void)scalar;
+    (void)alpha;
 
     __asm__ __volatile__ (
         "stp x19, x20, [sp, #-80]!\n\t"
@@ -182,7 +205,8 @@ static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, 
 /* hemv校验函数：利用Hermitian性质，仅扫描上三角部分(col>=row)，
  * 对角线直接乘，非对角线额外通过共轭对称性累加到 y[col]。
  * conj(a)*x = (a.re*x.re + a.im*x.im) + (a.re*x.im - a.im*x.re)i */
-static void hermitian_spmv_scalar(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, double scalar) {
+static void hermitian_spmv_scalar(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, complex_double_t alpha) {
+    (void)size;
     complex_double_t *val = (complex_double_t *)values_ptr;
     complex_double_t *vec = (complex_double_t *)vector_ptr;
     complex_double_t *y = (complex_double_t *)result_ptr;
@@ -195,13 +219,17 @@ static void hermitian_spmv_scalar(void *result_ptr, void *values_ptr, void *vect
             complex_double_t a = val[j];
             complex_double_t xj = vec[col];
             
-            y[i].re += a.re * xj.re - a.im * xj.im;
-            y[i].im += a.re * xj.im + a.im * xj.re;
+            double t_re = a.re * xj.re - a.im * xj.im;
+            double t_im = a.re * xj.im + a.im * xj.re;
+            y[i].re += alpha.re * t_re - alpha.im * t_im;
+            y[i].im += alpha.re * t_im + alpha.im * t_re;
             
             if (col != (int32_t)i) {
                 complex_double_t xi = vec[i];
-                y[col].re += a.re * xi.re + a.im * xi.im;
-                y[col].im += a.re * xi.im - a.im * xi.re;
+                double c_re = a.re * xi.re + a.im * xi.im;
+                double c_im = a.re * xi.im - a.im * xi.re;
+                y[col].re += alpha.re * c_re - alpha.im * c_im;
+                y[col].im += alpha.re * c_im + alpha.im * c_re;
             }
         }
     }
@@ -210,7 +238,7 @@ static void hermitian_spmv_scalar(void *result_ptr, void *values_ptr, void *vect
 typedef struct {
     const char *name;
     const char *category;
-    void (*func)(void *result, void *values, void *vector, uint64_t size, double scalar);
+    void (*func)(void *result, void *values, void *vector, uint64_t size, complex_double_t alpha);
 } test_item_t;
 
 static test_item_t test_registry[] = {
@@ -228,6 +256,8 @@ static void print_usage(const char *prog_name) {
     printf("  -r, --random-seed <N>   Random seed (default: 42)\n");
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
+    printf("  -a, --alpha <re,im>     Alpha complex scalar (default: 1.0,0.0)\n");
+    printf("  -b, --beta <re,im>      Beta complex scalar (default: 0.5,0.0)\n");
     printf("\nNote: Tests Hermitian matrix SpMV with full CSR storage\n");
     printf("      Diagonal elements are real (imaginary part = 0)\n");
     printf("      Verification uses hemv (upper triangle + conjugate symmetry)\n");
@@ -296,7 +326,8 @@ static double run_test(test_item_t *test, void *result, void *values, void *vect
 #endif
     
     for (int i = 0; i < warmup_iter; i++) {
-        test->func(result, values, vector, nnz, 1.0);
+        scale_result(result, beta);
+        test->func(result, values, vector, nnz, alpha);
     }
     
 #ifdef USE_MPI
@@ -305,7 +336,8 @@ static double run_test(test_item_t *test, void *result, void *values, void *vect
     
     gettimeofday(&start, NULL);
     for (int i = 0; i < test_iter; i++) {
-        test->func(result, values, vector, nnz, 1.0);
+        scale_result(result, beta);
+        test->func(result, values, vector, nnz, alpha);
     }
     gettimeofday(&end, NULL);
     
@@ -373,6 +405,14 @@ int main(int argc, char *argv[]) {
             if (test_iter < 1) test_iter = 10;
             continue;
         }
+        if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--alpha") == 0) {
+            if (i + 1 < argc) alpha = parse_complex(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--beta") == 0) {
+            if (i + 1 < argc) beta = parse_complex(argv[++i]);
+            continue;
+        }
         run_all = 0;
         num_specs++;
     }
@@ -387,6 +427,8 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&warmup_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&alpha, 2, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&beta, 2, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 #endif
     
     uint64_t total_elements = (uint64_t)matrix_dim * matrix_dim;
@@ -409,6 +451,8 @@ int main(int argc, char *argv[]) {
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
         printf("Random Seed: %u\n", random_seed);
+        printf("Alpha: %.4f,%.4f\n", alpha.re, alpha.im);
+        printf("Beta: %.4f,%.4f\n", beta.re, beta.im);
         printf("\n");
     }
     
@@ -574,8 +618,10 @@ int main(int argc, char *argv[]) {
     free(coo);
     
     /* ===== 阶段4：一次性校验 ===== */
-    hermitian_spmv_scalar(result_ref, values, vector, nnz, 1.0);
-    spmv_standard(result, values, vector, nnz, 1.0);
+    scale_result(result_ref, beta);
+    hermitian_spmv_scalar(result_ref, values, vector, nnz, alpha);
+    scale_result(result, beta);
+    spmv_standard(result, values, vector, nnz, alpha);
     
     int verify_errors = verify_spmv_result(result, result_ref);
     if (rank == 0) {
