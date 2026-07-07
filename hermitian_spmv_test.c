@@ -72,44 +72,54 @@ static complex_double_t parse_complex(const char *str) {
     return z;
 }
 
-/* hemv计算：利用Hermitian性质，仅扫描上三角部分(col>=row)，
- * 对角线直接乘，非对角线额外通过共轭对称性累加到 y[col]。
- * conj(a)*x = (a.re*x.re + a.im*x.im) + (a.re*x.im - a.im*x.re)i
+/*
+ * y += alpha * A * x (Hermitian SpMV, CSR full storage, 无清零)
  *
- * SVE内嵌汇编实现 (fcmla + zip):
- *   寄存器分配:
- *     x6=i  x7=row_start  x8=row_end  x9=j  x10=unused  x11=VL_doubles
- *     x14=地址计算临时寄存器
- *     q4=vec[i](128bit)
- *     z0=i-bcast  z1=col_idx(64bit)  z2=val(lo)  z3=val(hi)
- *     z4=x[col](lo)  z5=x[i]-bcast  z6=x[col](hi)/temp  z7=result(hi)
- *     z8=col*2  z9=unused  z10=temp  z11=内积高半累加器
- *     z14=temp  z15=内积低半累加器
- *     p0=loop/reduce-p_re  p1=col>=i/reduce-p_im  p2=col>i
- *     p3=zip1(p1,p1)  p4=zip1(p2,p2)  p5=zip2(p1,p1)  p6=zip2(p2,p2)
- *     p7=temp  p8=odd-lanes(循环不变量,归约分离实虚部) */
+ * 算法结构:
+ *   外层循环: 逐行处理 i = 0..dim-1
+ *   内层循环: 向量化处理第 i 行的非零元素 j = row_ptr[i]..row_ptr[i+1]-1
+ *
+ *   上三角 (col >= i) -- 内积操作:
+ *     y[i] += alpha * a * x[col]
+ *     归约累加,行结束后乘 alpha 写回 y[i]
+ *
+ *   严格上三角 (col > i) -- 外积操作(逻辑下三角贡献):
+ *     y[col] += alpha * conj(a) * x[i]
+ *     x[i] 先乘 alpha 再广播,散射累加到 y[col]
+ *
+ * 寄存器分配:
+ *   x6=i  x7=row_start  x8=row_end  x9=j  x11=VL_doubles
+ *   x14=地址计算临时寄存器
+ *   x19=y  x20=val  x21=vec  x22=rp  x23=ci  x24=dim  x25=alpha_addr
+ *   q4=vec[i](128bit)  q9=alpha(128bit)
+ *   z0=i-bcast  z1=col_idx  z2=val(lo)  z3=val(hi)
+ *   z4=x[col](lo)  z5=alpha*x[i]-bcast  z6=x[col](hi)/temp  z7=result(hi)
+ *   z8=col*2  z10=temp  z11=内积高半累加器  z12=alpha*x[i] temp
+ *   z14=temp  z15=内积低半累加器
+ *   p0=loop  p1=col>=i  p2=col>i
+ *   p3=zip1(p1)  p4=zip1(p2)  p5=zip2(p1)  p6=zip2(p2)  p7=all-true/reduce
+ */
 static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, complex_double_t alpha) {
     (void)size;
-    (void)alpha;
 
     __asm__ __volatile__ (
-        "stp x19, x20, [sp, #-80]!\n\t"
+        "stp x19, x20, [sp, #-96]!\n\t"
         "stp x21, x22, [sp, #16]\n\t"
         "stp x23, x24, [sp, #32]\n\t"
         "stp x29, x30, [sp, #48]\n\t"
-        "str x14, [sp, #64]\n\t"
+        "stp x14, x25, [sp, #64]\n\t"
         "mov x19, %[y]\n\t"
         "mov x20, %[val]\n\t"
         "mov x21, %[vec]\n\t"
         "mov x22, %[rp]\n\t"
         "mov x23, %[ci]\n\t"
         "mov x24, %[dim]\n\t"
+        "mov x25, %[alpha]\n\t"
+        "ldr q9, [x25]\n\t"
         "rdvl x11, #1\n\t"
         "lsr x11, x11, #3\n\t"
-        "ptrue p7.b\n\t"
         "index z0.d, #0, #1\n\t"
         "and z0.d, z0.d, #1\n\t"
-        "cmpne p8.d, p7/z, z0.d, #0\n\t"
         "mov x6, #0\n\t"
         "3:\n\t"
         "cmp x6, x24\n\t"
@@ -119,7 +129,10 @@ static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, 
         "ldr x8, [x14, #8]\n\t"
         "add x14, x21, x6, lsl #4\n\t"
         "ldr q4, [x14]\n\t"
-        "mov z5.q, q4\n\t"
+        "mov z12.d, #0\n\t"
+        "fcmla v12.2d, v4.2d, v9.2d, #0\n\t"
+        "fcmla v12.2d, v4.2d, v9.2d, #90\n\t"
+        "mov z5.q, q12\n\t"
         "mov z15.d, #0\n\t"
         "mov z11.d, #0\n\t"
         "mov x9, x7\n\t"
@@ -167,34 +180,30 @@ static void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr, 
         "b 5b\n\t"
         "6:\n\t"
         "ptrue p7.b\n\t"
-        "not p0.b, p7/z, p8.b\n\t"
-        "faddv d0, p0, z15.d\n\t"
-        "faddv d1, p0, z11.d\n\t"
-        "fadd d0, d0, d1\n\t"
+        "uzp1 z6.d, z15.d, z11.d\n\t"
+        "uzp2 z7.d, z15.d, z11.d\n\t"
+        "faddv d0, p7, z6.d\n\t"
+        "faddv d1, p7, z7.d\n\t"
+        "mov v0.d[1], v1.d[0]\n\t"
         "add x14, x19, x6, lsl #4\n\t"
-        "ldr d4, [x14]\n\t"
-        "fadd d4, d4, d0\n\t"
-        "str d4, [x14]\n\t"
-        "mov p7.b, p8.b\n\t"
-        "faddv d0, p7, z15.d\n\t"
-        "faddv d1, p7, z11.d\n\t"
-        "fadd d0, d0, d1\n\t"
-        "ldr d4, [x14, #8]\n\t"
-        "fadd d4, d4, d0\n\t"
-        "str d4, [x14, #8]\n\t"
+        "ldr q1, [x14]\n\t"
+        "fcmla v1.2d, v0.2d, v9.2d, #0\n\t"
+        "fcmla v1.2d, v0.2d, v9.2d, #90\n\t"
+        "str q1, [x14]\n\t"
         "add x6, x6, #1\n\t"
         "b 3b\n\t"
         "4:\n\t"
-        "ldr x14, [sp, #64]\n\t"
+        "ldp x14, x25, [sp, #64]\n\t"
         "ldp x29, x30, [sp, #48]\n\t"
         "ldp x23, x24, [sp, #32]\n\t"
         "ldp x21, x22, [sp, #16]\n\t"
-        "ldp x19, x20, [sp], #80\n\t"
+        "ldp x19, x20, [sp], #96\n\t"
         : /* no outputs */
         : [y] "r"(result_ptr), [val] "r"(values_ptr), [vec] "r"(vector_ptr),
-          [rp] "r"(row_ptr), [ci] "r"(col_idx), [dim] "r"(matrix_dim)
+          [rp] "r"(row_ptr), [ci] "r"(col_idx), [dim] "r"(matrix_dim),
+          [alpha] "r"(&alpha)
         : "x6", "x7", "x8", "x9", "x10", "x11", "x14",
-          "x19", "x20", "x21", "x22", "x23", "x24",
+          "x19", "x20", "x21", "x22", "x23", "x24", "x25",
           "z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7",
           "z8", "z9", "z10", "z11", "z12", "z13", "z14", "z15",
           "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8",

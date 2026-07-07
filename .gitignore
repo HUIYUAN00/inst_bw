@@ -12,6 +12,7 @@ matrix_scale_test_mpi
 hermitian_spmv_test
 hermitian_spmv_test_mpi
 *.o
+AGENTS.md
 opencode.json
 sparse_matrix*.txt
 indices*.txt

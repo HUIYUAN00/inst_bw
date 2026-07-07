@@ -16,18 +16,15 @@ typedef struct {
 } coo_entry_t;
 
 extern void spmv_standard(void *result_ptr, void *values_ptr, void *vector_ptr,
-                          uint64_t *row_ptr, int32_t *col_idx, int matrix_dim);
+                          uint64_t *row_ptr, int32_t *col_idx, int matrix_dim,
+                          complex_double_t alpha);
 
 static void hermitian_spmv_scalar(void *result_ptr, void *values_ptr, void *vector_ptr,
-                                   uint64_t *row_ptr, int32_t *col_idx, int matrix_dim) {
+                                   uint64_t *row_ptr, int32_t *col_idx, int matrix_dim,
+                                   complex_double_t alpha) {
     complex_double_t *val = (complex_double_t *)values_ptr;
     complex_double_t *vec = (complex_double_t *)vector_ptr;
     complex_double_t *y = (complex_double_t *)result_ptr;
-
-    for (int i = 0; i < matrix_dim; i++) {
-        y[i].re = 0.0;
-        y[i].im = 0.0;
-    }
 
     for (int i = 0; i < matrix_dim; i++) {
         for (uint64_t j = row_ptr[i]; j < row_ptr[i + 1]; j++) {
@@ -37,13 +34,17 @@ static void hermitian_spmv_scalar(void *result_ptr, void *values_ptr, void *vect
             complex_double_t a = val[j];
             complex_double_t xj = vec[col];
 
-            y[i].re += a.re * xj.re - a.im * xj.im;
-            y[i].im += a.re * xj.im + a.im * xj.re;
+            double t_re = a.re * xj.re - a.im * xj.im;
+            double t_im = a.re * xj.im + a.im * xj.re;
+            y[i].re += alpha.re * t_re - alpha.im * t_im;
+            y[i].im += alpha.re * t_im + alpha.im * t_re;
 
             if (col != i) {
                 complex_double_t xi = vec[i];
-                y[col].re += a.re * xi.re + a.im * xi.im;
-                y[col].im += a.re * xi.im - a.im * xi.re;
+                double c_re = a.re * xi.re + a.im * xi.im;
+                double c_im = a.re * xi.im - a.im * xi.re;
+                y[col].re += alpha.re * c_re - alpha.im * c_im;
+                y[col].im += alpha.re * c_im + alpha.im * c_re;
             }
         }
     }
@@ -193,8 +194,12 @@ static int run_test(int matrix_dim, uint64_t *row_ptr, int32_t *col_idx,
     printf("[%s] Matrix: %dx%d, NNZ: %lu, Avg NNZ/Row: %.2f\n",
            label, matrix_dim, matrix_dim, actual_nnz, (double)actual_nnz / matrix_dim);
 
-    hermitian_spmv_scalar(result_ref, values, vector, row_ptr, col_idx, matrix_dim);
-    spmv_standard(result, values, vector, row_ptr, col_idx, matrix_dim);
+    complex_double_t alpha_val = {1.0, 0.0};
+    memset(result, 0, matrix_dim * sizeof(complex_double_t));
+    memset(result_ref, 0, matrix_dim * sizeof(complex_double_t));
+
+    hermitian_spmv_scalar(result_ref, values, vector, row_ptr, col_idx, matrix_dim, alpha_val);
+    spmv_standard(result, values, vector, row_ptr, col_idx, matrix_dim, alpha_val);
 
     int errors = 0;
     for (int i = 0; i < matrix_dim; i++) {
@@ -228,8 +233,12 @@ static int test_known_2x2(void) {
     complex_double_t vector[2] = {{1.0, 0.0}, {0.0, 1.0}};
     complex_double_t result[2], result_ref[2];
 
-    hermitian_spmv_scalar(result_ref, values, vector, row_ptr, col_idx, dim);
-    spmv_standard(result, values, vector, row_ptr, col_idx, dim);
+    complex_double_t alpha_val = {1.0, 0.0};
+    memset(result, 0, sizeof(result));
+    memset(result_ref, 0, sizeof(result_ref));
+
+    hermitian_spmv_scalar(result_ref, values, vector, row_ptr, col_idx, dim, alpha_val);
+    spmv_standard(result, values, vector, row_ptr, col_idx, dim, alpha_val);
 
     printf("[known-2x2] ref: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
            result_ref[0].re, result_ref[0].im, result_ref[1].re, result_ref[1].im);
@@ -246,8 +255,10 @@ static int test_known_2x2(void) {
     /* Test 2: off-diagonal only */
     complex_double_t values2[4] = {{0.0, 0.0}, {1.0, 1.0}, {1.0, -1.0}, {0.0, 0.0}};
     complex_double_t result2[2], result2_ref[2];
-    hermitian_spmv_scalar(result2_ref, values2, vector, row_ptr, col_idx, dim);
-    spmv_standard(result2, values2, vector, row_ptr, col_idx, dim);
+    memset(result2, 0, sizeof(result2));
+    memset(result2_ref, 0, sizeof(result2_ref));
+    hermitian_spmv_scalar(result2_ref, values2, vector, row_ptr, col_idx, dim, alpha_val);
+    spmv_standard(result2, values2, vector, row_ptr, col_idx, dim, alpha_val);
     printf("[off-diag]  ref: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
            result2_ref[0].re, result2_ref[0].im, result2_ref[1].re, result2_ref[1].im);
     printf("[off-diag]  asm: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
@@ -260,8 +271,10 @@ static int test_known_2x2(void) {
     /* Test 3: diagonal only */
     complex_double_t values3[4] = {{3.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}, {5.0, 0.0}};
     complex_double_t result3[2], result3_ref[2];
-    hermitian_spmv_scalar(result3_ref, values3, vector, row_ptr, col_idx, dim);
-    spmv_standard(result3, values3, vector, row_ptr, col_idx, dim);
+    memset(result3, 0, sizeof(result3));
+    memset(result3_ref, 0, sizeof(result3_ref));
+    hermitian_spmv_scalar(result3_ref, values3, vector, row_ptr, col_idx, dim, alpha_val);
+    spmv_standard(result3, values3, vector, row_ptr, col_idx, dim, alpha_val);
     printf("[diag-only] ref: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
            result3_ref[0].re, result3_ref[0].im, result3_ref[1].re, result3_ref[1].im);
     printf("[diag-only] asm: y[0]=(%.6f,%.6f) y[1]=(%.6f,%.6f)\n",
