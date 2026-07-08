@@ -161,10 +161,11 @@ int main(int argc, char *argv[]) {
     
     srand(random_seed);
     
-    uint64_t elem_count = (uint64_t)matrix_dim * matrix_dim;
-    for (uint64_t i = 0; i < elem_count; i++) {
-        A[i] = (double)rand() / RAND_MAX;
-        B[i] = 0.0;
+    for (int i = 0; i < matrix_dim; i++) {
+        for (int j = 0; j < matrix_dim; j++) {
+            A[i * matrix_dim + j] = (double)rand() / RAND_MAX;
+            B[i * matrix_dim + j] = (double)rand() / RAND_MAX;
+        }
     }
     
     if (rank == 0) {
