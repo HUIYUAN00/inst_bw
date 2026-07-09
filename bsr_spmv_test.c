@@ -435,17 +435,30 @@ int main(int argc, char *argv[]) {
         vector[i].im = (double)rand() / RAND_MAX;
     }
 
+    /* ===== 阶段1：在上三角块网格中随机采样非零块位置 =====
+     *
+     * 原始 N×N 矩阵被划分为 nbr×nbr 的块网格(nbr = N/r),每块 r×r 元素。
+     * Hermitian 矩阵只需存储上三角块(I<=J),下三角通过共轭对称性推导。
+     * 上三角块总数 = nbr*(nbr+1)/2,从中按 sparsity 比例采样 nnz_blocks 个。
+     *
+     * 采样策略: bitmap 去重,保证每个块位置最多采一次。
+     * 块位置 (I,J) 映射为一维索引: idx = I*nbr - I*(I+1)/2 + J
+     *   (仅对 I<=J 有效,即上三角的紧凑编号)
+     *
+     * 数据结构: coords[] 数组暂存 (block_row, block_col) 对,采样后排序转 CSR。
+     */
     block_coord_t *coords = (block_coord_t *)malloc(nnz_blocks * sizeof(block_coord_t));
     uint64_t *coverage = (uint64_t *)calloc((total_upper_blocks / 64) + 2, sizeof(uint64_t));
     uint64_t unique_count = 0;
     int attempts = 0;
     int max_attempts = nnz_blocks * 20;
 
+    /* 阶段1a: 随机采样 */
     while (unique_count < nnz_blocks && attempts < max_attempts) {
         uint64_t rand_val = ((uint64_t)rand() << 32) | (uint64_t)rand();
         uint64_t I = rand_val % num_block_rows;
         uint64_t J = rand_val % num_block_rows;
-        if (I > J) { uint64_t t = I; I = J; J = t; }
+        if (I > J) { uint64_t t = I; I = J; J = t; }  /* 强制 I<=J,仅取上三角 */
         uint64_t idx = I * num_block_rows - I * (I + 1) / 2 + J;
         uint64_t bucket = idx / 64;
         uint64_t bit = idx % 64;
@@ -458,6 +471,7 @@ int main(int argc, char *argv[]) {
         attempts++;
     }
 
+    /* 阶段1b: 顺序兜底——若随机采样不足,顺序扫描上三角补齐 */
     for (uint64_t I = 0; I < num_block_rows && unique_count < nnz_blocks; I++) {
         for (uint64_t J = I; J < num_block_rows && unique_count < nnz_blocks; J++) {
             uint64_t idx = I * num_block_rows - I * (I + 1) / 2 + J;
@@ -474,50 +488,84 @@ int main(int argc, char *argv[]) {
 
     free(coverage);
 
+    /* ===== 阶段2: 按 (block_row, block_col) 升序排序 =====
+     *
+     * 排序后 coords[] 按块行主序排列,为 CSR 转换做准备。
+     */
     qsort(coords, nnz_blocks, sizeof(block_coord_t), compare_coord);
 
+    /* ===== 阶段3: 从排序后的 coords 构建 BSR 的三个核心数组 =====
+     *
+     * 最终 BSR 数据结构(三个数组):
+     *
+     *   row_ptr[nbr+1]: 块行指针
+     *     row_ptr[I] 到 row_ptr[I+1]-1 是第 I 个块行的非零块在 col_idx/values 中的连续偏移
+     *     长度 = num_block_rows + 1, row_ptr[0]=0, row_ptr[nbr]=nnz_blocks
+     *
+     *   col_idx[nnz_blocks]: 块列索引
+     *     col_idx[j] = 第 j 个非零块所在的块列号 J
+     *     对应原始矩阵的列范围 [J*r, (J+1)*r)
+     *
+     *   values[nnz_blocks * r * r]: 块数据,行主序存储
+     *     第 j 个块从 values[j*r*r] 开始,连续 r*r 个 complex_double_t
+     *     块内元素 (bi,bk) 存于 values[j*r*r + bi*r + bk]
+     *     对应原始矩阵 A[I*r+bi][J*r+bk]
+     *
+     * 示意(nbr=3, r=2, nnz_blocks=4):
+     *   块网格(上三角):     BSR 数组:
+     *     I=0: [0,0][0,2]    row_ptr = [0, 2, 3, 4]
+     *     I=1: [1,1]         col_idx = [0, 2, 1, 2]
+     *     I=2: [2,2]         values  = [B00|B02|B11|B22]  每块 4 个元素
+     */
     row_ptr[0] = 0;
     uint64_t current_row = 0;
 
     for (uint64_t i = 0; i < nnz_blocks; i++) {
         col_idx[i] = (int32_t)coords[i].col;
+        /* 为跳过的空块行填充 row_ptr */
         while (current_row < coords[i].row) {
             row_ptr[current_row + 1] = i;
             current_row++;
         }
     }
+    /* 为尾部空块行填充 row_ptr */
     while (current_row < num_block_rows) {
         row_ptr[current_row + 1] = nnz_blocks;
         current_row++;
     }
 
+    /* ===== 阶段4: 填充块内数值 =====
+     *
+     * 先将所有块统一填充为随机复数(常规矩阵),不区分对角/非对角。
+     * 块内 r×r 元素按行主序存储: block[bi*r + bk] = A[I*r+bi][J*r+bk]
+     */
     int r = block_size;
     for (uint64_t i = 0; i < nnz_blocks; i++) {
-        uint64_t I = coords[i].row;
-        uint64_t J = coords[i].col;
         complex_double_t *block = &values[i * r * r];
-
-        if (I == J) {
-            for (int bi = 0; bi < r; bi++) {
-                for (int bk = 0; bk < r; bk++) {
-                    if (bi == bk) {
-                        block[bi * r + bk].re = (double)rand() / RAND_MAX;
-                        block[bi * r + bk].im = 0.0;
-                    } else if (bi < bk) {
-                        double re = (double)rand() / RAND_MAX;
-                        double im = (double)rand() / RAND_MAX;
-                        block[bi * r + bk].re = re;
-                        block[bi * r + bk].im = im;
-                        block[bk * r + bi].re = re;
-                        block[bk * r + bi].im = -im;
-                    }
-                }
+        for (int bi = 0; bi < r; bi++) {
+            for (int bk = 0; bk < r; bk++) {
+                block[bi * r + bk].re = (double)rand() / RAND_MAX;
+                block[bi * r + bk].im = (double)rand() / RAND_MAX;
             }
-        } else {
-            for (int bi = 0; bi < r; bi++) {
-                for (int bk = 0; bk < r; bk++) {
-                    block[bi * r + bk].re = (double)rand() / RAND_MAX;
-                    block[bi * r + bk].im = (double)rand() / RAND_MAX;
+        }
+    }
+
+    /* ===== 阶段5: Hermitian 约束——对角块对角线虚部置零 =====
+     *
+     * Hermitian 矩阵要求 A[i][i] 为实数(虚部=0)。
+     * 在块级别: 对角块(I==J)的块内对角元素(bi==bk)虚部必须为 0。
+     * 遍历所有对角块,将 block[bi*r + bi].im 置零,实部保持不变。
+     * 非对角块和非对角元素不受影响。
+     *
+     * 注: 此处仅置零对角线虚部,不做共轭对称填充。
+     *     上三角块存储原始值,下三角贡献在 SpMV 中通过共轭计算。
+     */
+    for (uint64_t I = 0; I < num_block_rows; I++) {
+        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
+            if ((uint64_t)col_idx[j] == I) {  /* 对角块 I==J */
+                complex_double_t *block = &values[j * r * r];
+                for (int bi = 0; bi < r; bi++) {
+                    block[bi * r + bi].im = 0.0;  /* 块内主对角线虚部置零 */
                 }
             }
         }
