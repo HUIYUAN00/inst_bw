@@ -5,7 +5,7 @@ LDFLAGS = -lm
 MPI_CFLAGS = $(CFLAGS) -DUSE_MPI
 OMP_CFLAGS = $(CFLAGS) -fopenmp
 
-all: sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi matrix_scale_test matrix_scale_test_mpi hermitian_spmv_test hermitian_spmv_test_mpi test_spmv_asm
+all: sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi matrix_scale_test matrix_scale_test_mpi hermitian_spmv_test hermitian_spmv_test_mpi bsr_spmv_test bsr_spmv_test_mpi test_spmv_asm
 
 sve_bw_test: sve_bw_test.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -46,6 +46,12 @@ hermitian_spmv_test: hermitian_spmv_test.c
 hermitian_spmv_test_mpi: hermitian_spmv_test.c
 	$(MPICC) $(MPI_CFLAGS) -o $@ $<
 
+bsr_spmv_test: bsr_spmv_test.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
+bsr_spmv_test_mpi: bsr_spmv_test.c
+	$(MPICC) $(MPI_CFLAGS) $(LDFLAGS) -o $@ $<
+
 spmv_asm.o: spmv_asm.s
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -53,7 +59,7 @@ test_spmv_asm: test_spmv_asm.c spmv_asm.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 clean:
-	rm -f sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi matrix_scale_test matrix_scale_test_mpi hermitian_spmv_test hermitian_spmv_test_mpi spmv_asm.o test_spmv_asm
+	rm -f sve_bw_test sve_bw_test_mpi gather_scatter_test gather_scatter_test_mpi stream_omp_test sparse_spmv_test sparse_spmv_test_mpi gather_d_single_reg_test gather_d_single_reg_test_mpi matrix_scale_test matrix_scale_test_mpi hermitian_spmv_test hermitian_spmv_test_mpi bsr_spmv_test bsr_spmv_test_mpi spmv_asm.o test_spmv_asm
 
 run: sve_bw_test_mpi
 	mpirun --allow-run-as-root -np 4 ./sve_bw_test_mpi
@@ -100,4 +106,10 @@ run_hermitian_spmv_mpi: hermitian_spmv_test_mpi
 run_spmv_asm: test_spmv_asm
 	./test_spmv_asm
 
-.PHONY: all clean run run_single run_gs run_gs_mpi run_stream_omp run_stream_omp_8 run_spmv run_spmv_mpi run_gather_d_single run_gather_d_single_mpi run_matrix_scale run_matrix_scale_mpi run_hermitian_spmv run_hermitian_spmv_mpi run_spmv_asm
+run_bsr_spmv: bsr_spmv_test
+	./bsr_spmv_test
+
+run_bsr_spmv_mpi: bsr_spmv_test_mpi
+	mpirun --allow-run-as-root -np 4 ./bsr_spmv_test_mpi
+
+.PHONY: all clean run run_single run_gs run_gs_mpi run_stream_omp run_stream_omp_8 run_spmv run_spmv_mpi run_gather_d_single run_gather_d_single_mpi run_matrix_scale run_matrix_scale_mpi run_hermitian_spmv run_hermitian_spmv_mpi run_spmv_asm run_bsr_spmv run_bsr_spmv_mpi
