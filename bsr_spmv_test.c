@@ -20,17 +20,17 @@ static unsigned int random_seed = 42;
 static int print_all_ranks = 0;
 
 typedef struct {
-    double re;
-    double im;
-} complex_double_t;
+    float re;
+    float im;
+} complex_float_t;
 
 static uint64_t nnz_blocks = 0;
 static uint64_t *row_ptr = NULL;
 static int32_t *col_idx = NULL;
-static complex_double_t *values = NULL;
-static complex_double_t *vector = NULL;
-static complex_double_t *result = NULL;
-static complex_double_t *result_ref = NULL;
+static complex_float_t *values = NULL;
+static complex_float_t *vector = NULL;
+static complex_float_t *result = NULL;
+static complex_float_t *result_ref = NULL;
 
 typedef struct {
     const char *name;
@@ -58,7 +58,7 @@ static int compare_coord(const void *a, const void *b) {
 #pragma GCC optimize ("O3")
 
 /*
- * BSR Hermitian SpMV: y = A*x
+ * BSR Hermitian SpMV: y = A*x (complex float)
  * 仅存储上三角块(I<=J),利用共轭对称性计算下三角贡献。
  *
  * 对角块(I==J): 块本身为Hermitian,直接乘加到 y[I*r+i]
@@ -69,36 +69,36 @@ static int compare_coord(const void *a, const void *b) {
 static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, double scalar) {
     (void)size;
     (void)scalar;
-    complex_double_t *val = (complex_double_t *)values_ptr;
-    complex_double_t *vec = (complex_double_t *)vector_ptr;
-    complex_double_t *y = (complex_double_t *)result_ptr;
+    complex_float_t *val = (complex_float_t *)values_ptr;
+    complex_float_t *vec = (complex_float_t *)vector_ptr;
+    complex_float_t *y = (complex_float_t *)result_ptr;
     int r = block_size;
     uint64_t nbr = matrix_size / r;
 
     for (uint64_t i = 0; i < matrix_size; i++) {
-        y[i].re = 0.0;
-        y[i].im = 0.0;
+        y[i].re = 0.0f;
+        y[i].im = 0.0f;
     }
 
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
             int32_t J = col_idx[j];
-            complex_double_t *block = &val[j * r * r];
+            complex_float_t *block = &val[j * r * r];
 
             for (int i = 0; i < r; i++) {
                 for (int k = 0; k < r; k++) {
-                    complex_double_t a = block[i * r + k];
-                    complex_double_t xj = vec[J * r + k];
+                    complex_float_t a = block[i * r + k];
+                    complex_float_t xj = vec[J * r + k];
                     y[I * r + i].re += a.re * xj.re - a.im * xj.im;
                     y[I * r + i].im += a.re * xj.im + a.im * xj.re;
                 }
             }
 
             if (I < J) {
-                complex_double_t *xi = &vec[I * r];
+                complex_float_t *xi = &vec[I * r];
                 for (int k = 0; k < r; k++) {
                     for (int i = 0; i < r; i++) {
-                        complex_double_t a = block[i * r + k];
+                        complex_float_t a = block[i * r + k];
                         y[J * r + k].re += a.re * xi[i].re + a.im * xi[i].im;
                         y[J * r + k].im += a.re * xi[i].im - a.im * xi[i].re;
                     }
@@ -111,16 +111,16 @@ static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vecto
 static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_ptr, uint64_t size, double scalar) {
     (void)size;
     (void)scalar;
-    complex_double_t *val = (complex_double_t *)values_ptr;
-    complex_double_t *vec = (complex_double_t *)vector_ptr;
-    complex_double_t *y = (complex_double_t *)result_ptr;
+    complex_float_t *val = (complex_float_t *)values_ptr;
+    complex_float_t *vec = (complex_float_t *)vector_ptr;
+    complex_float_t *y = (complex_float_t *)result_ptr;
     int r = block_size;
     uint64_t nbr = matrix_size / r;
-    uint64_t vl_doubles = svcntd();
+    uint64_t vl_floats = svcntw();
 
     for (uint64_t i = 0; i < matrix_size; i++) {
-        y[i].re = 0.0;
-        y[i].im = 0.0;
+        y[i].re = 0.0f;
+        y[i].im = 0.0f;
     }
 
     /* ===== 第1趟: 对角块(I==J) =====
@@ -131,30 +131,30 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
             if ((uint64_t)col_idx[j] != I) continue;
-            complex_double_t *block = &val[j * r * r];
+            complex_float_t *block = &val[j * r * r];
 
             for (int i = 0; i < r; i++) {
-                double *br = (double *)&block[i * r];
-                double *xr = (double *)&vec[I * r];
+                float *br = (float *)&block[i * r];
+                float *xr = (float *)&vec[I * r];
                 uint64_t total = (uint64_t)r * 2;
                 uint64_t off = 0;
-                double sum_re = 0.0, sum_im = 0.0;
+                float sum_re = 0.0f, sum_im = 0.0f;
 
                 while (off < total) {
-                    uint64_t cnt = (total - off < vl_doubles) ? (total - off) : vl_doubles;
-                    svuint64_t idx = svindex_u64(0, 1);
-                    svbool_t pgall = svptrue_b64();
-                    svbool_t pg = svcmplt_u64(pgall, idx, svdup_u64(cnt));
-                    svfloat64_t za = svld1_f64(pg, br + off);
-                    svfloat64_t zx = svld1_f64(pg, xr + off);
-                    svfloat64_t zacc = svdup_f64(0.0);
-                    zacc = svcmla_f64_m(pg, zacc, za, zx, 0);
-                    zacc = svcmla_f64_m(pg, zacc, za, zx, 90);
-                    svfloat64_t zzero = svdup_f64(0.0);
-                    svfloat64_t zre = svuzp1_f64(zacc, zzero);
-                    svfloat64_t zim = svuzp2_f64(zacc, zzero);
-                    sum_re += svaddv_f64(pgall, zre);
-                    sum_im += svaddv_f64(pgall, zim);
+                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                    svuint32_t idx = svindex_u32(0, 1);
+                    svbool_t pgall = svptrue_b32();
+                    svbool_t pg = svcmplt_u32(pgall, idx, svdup_u32(cnt));
+                    svfloat32_t za = svld1_f32(pg, br + off);
+                    svfloat32_t zx = svld1_f32(pg, xr + off);
+                    svfloat32_t zacc = svdup_f32(0.0f);
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
+                    svfloat32_t zzero = svdup_f32(0.0f);
+                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                    sum_re += svaddv_f32(pgall, zre);
+                    sum_im += svaddv_f32(pgall, zim);
                     off += cnt;
                 }
 
@@ -172,30 +172,30 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
             if ((uint64_t)col_idx[j] <= I) continue;
             int32_t J = col_idx[j];
-            complex_double_t *block = &val[j * r * r];
+            complex_float_t *block = &val[j * r * r];
 
             for (int i = 0; i < r; i++) {
-                double *br = (double *)&block[i * r];
-                double *xr = (double *)&vec[J * r];
+                float *br = (float *)&block[i * r];
+                float *xr = (float *)&vec[J * r];
                 uint64_t total = (uint64_t)r * 2;
                 uint64_t off = 0;
-                double sum_re = 0.0, sum_im = 0.0;
+                float sum_re = 0.0f, sum_im = 0.0f;
 
                 while (off < total) {
-                    uint64_t cnt = (total - off < vl_doubles) ? (total - off) : vl_doubles;
-                    svuint64_t idx = svindex_u64(0, 1);
-                    svbool_t pgall = svptrue_b64();
-                    svbool_t pg = svcmplt_u64(pgall, idx, svdup_u64(cnt));
-                    svfloat64_t za = svld1_f64(pg, br + off);
-                    svfloat64_t zx = svld1_f64(pg, xr + off);
-                    svfloat64_t zacc = svdup_f64(0.0);
-                    zacc = svcmla_f64_m(pg, zacc, za, zx, 0);
-                    zacc = svcmla_f64_m(pg, zacc, za, zx, 90);
-                    svfloat64_t zzero = svdup_f64(0.0);
-                    svfloat64_t zre = svuzp1_f64(zacc, zzero);
-                    svfloat64_t zim = svuzp2_f64(zacc, zzero);
-                    sum_re += svaddv_f64(pgall, zre);
-                    sum_im += svaddv_f64(pgall, zim);
+                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                    svuint32_t idx = svindex_u32(0, 1);
+                    svbool_t pgall = svptrue_b32();
+                    svbool_t pg = svcmplt_u32(pgall, idx, svdup_u32(cnt));
+                    svfloat32_t za = svld1_f32(pg, br + off);
+                    svfloat32_t zx = svld1_f32(pg, xr + off);
+                    svfloat32_t zacc = svdup_f32(0.0f);
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
+                    svfloat32_t zzero = svdup_f32(0.0f);
+                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                    sum_re += svaddv_f32(pgall, zre);
+                    sum_im += svaddv_f32(pgall, zim);
                     off += cnt;
                 }
 
@@ -213,12 +213,12 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
             if ((uint64_t)col_idx[j] <= I) continue;
             int32_t J = col_idx[j];
-            complex_double_t *block = &val[j * r * r];
-            complex_double_t *xi = &vec[I * r];
+            complex_float_t *block = &val[j * r * r];
+            complex_float_t *xi = &vec[I * r];
 
             for (int k = 0; k < r; k++) {
                 for (int i = 0; i < r; i++) {
-                    complex_double_t a = block[i * r + k];
+                    complex_float_t a = block[i * r + k];
                     y[J * r + k].re += a.re * xi[i].re + a.im * xi[i].im;
                     y[J * r + k].im += a.re * xi[i].im - a.im * xi[i].re;
                 }
@@ -247,7 +247,7 @@ static void print_usage(const char *prog_name) {
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
-    printf("\nNote: Tests Hermitian BSR SpMV with upper triangle block storage\n");
+    printf("\nNote: Tests Hermitian BSR SpMV (complex float) with upper triangle block storage\n");
     printf("      Diagonal blocks are Hermitian (conjugate-symmetric)\n");
     printf("      Off-diagonal blocks use conjugate symmetry for lower triangle\n");
 }
@@ -286,14 +286,15 @@ static int should_run_test(int test_idx, int num_specs, char **specs) {
 }
 
 static int verify_hemv(void *result_ptr, void *ref_ptr) {
-    complex_double_t *y = (complex_double_t *)result_ptr;
-    complex_double_t *y_ref = (complex_double_t *)ref_ptr;
+    complex_float_t *y = (complex_float_t *)result_ptr;
+    complex_float_t *y_ref = (complex_float_t *)ref_ptr;
     int errors = 0;
 
     for (uint64_t i = 0; i < matrix_size && errors < 5; i++) {
-        double re_diff = fabs(y[i].re - y_ref[i].re);
-        double im_diff = fabs(y[i].im - y_ref[i].im);
-        if (re_diff > 1e-9 || im_diff > 1e-9) {
+        float re_diff = fabsf(y[i].re - y_ref[i].re);
+        float im_diff = fabsf(y[i].im - y_ref[i].im);
+        float scale = fmaxf(fmaxf(fabsf(y_ref[i].re), fabsf(y_ref[i].im)), 1.0f);
+        if (re_diff > 1e-4 * scale || im_diff > 1e-4 * scale) {
             if (errors == 0) fprintf(stderr, "BSR HEMV verify FAILED:\n");
             fprintf(stderr, "  result[%lu]: expected (%.6f,%.6f), got (%.6f,%.6f)\n",
                     i, y_ref[i].re, y_ref[i].im, y[i].re, y[i].im);
@@ -460,10 +461,10 @@ int main(int argc, char *argv[]) {
 
     if (posix_memalign((void**)&row_ptr, 64, (num_block_rows + 1) * sizeof(uint64_t)) != 0 ||
         posix_memalign((void**)&col_idx, 64, nnz_blocks * sizeof(int32_t)) != 0 ||
-        posix_memalign((void**)&values, 64, nnz_elements * sizeof(complex_double_t)) != 0 ||
-        posix_memalign((void**)&vector, 64, matrix_size * sizeof(complex_double_t)) != 0 ||
-        posix_memalign((void**)&result, 64, matrix_size * sizeof(complex_double_t)) != 0 ||
-        posix_memalign((void**)&result_ref, 64, matrix_size * sizeof(complex_double_t)) != 0) {
+        posix_memalign((void**)&values, 64, nnz_elements * sizeof(complex_float_t)) != 0 ||
+        posix_memalign((void**)&vector, 64, matrix_size * sizeof(complex_float_t)) != 0 ||
+        posix_memalign((void**)&result, 64, matrix_size * sizeof(complex_float_t)) != 0 ||
+        posix_memalign((void**)&result_ref, 64, matrix_size * sizeof(complex_float_t)) != 0) {
 #ifdef USE_MPI
         fprintf(stderr, "[Rank %d] Failed to allocate aligned memory\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
@@ -476,8 +477,8 @@ int main(int argc, char *argv[]) {
     srand(random_seed);
 
     for (uint64_t i = 0; i < matrix_size; i++) {
-        vector[i].re = (double)rand() / RAND_MAX;
-        vector[i].im = (double)rand() / RAND_MAX;
+        vector[i].re = (float)rand() / RAND_MAX;
+        vector[i].im = (float)rand() / RAND_MAX;
     }
 
     /* ===== 阶段1：在上三角块网格中随机采样非零块位置 =====
@@ -552,7 +553,7 @@ int main(int argc, char *argv[]) {
      *     对应原始矩阵的列范围 [J*r, (J+1)*r)
      *
      *   values[nnz_blocks * r * r]: 块数据,行主序存储
-     *     第 j 个块从 values[j*r*r] 开始,连续 r*r 个 complex_double_t
+     *     第 j 个块从 values[j*r*r] 开始,连续 r*r 个 complex_float_t
      *     块内元素 (bi,bk) 存于 values[j*r*r + bi*r + bk]
      *     对应原始矩阵 A[I*r+bi][J*r+bk]
      *
@@ -586,11 +587,11 @@ int main(int argc, char *argv[]) {
      */
     int r = block_size;
     for (uint64_t i = 0; i < nnz_blocks; i++) {
-        complex_double_t *block = &values[i * r * r];
+        complex_float_t *block = &values[i * r * r];
         for (int bi = 0; bi < r; bi++) {
             for (int bk = 0; bk < r; bk++) {
-                block[bi * r + bk].re = (double)rand() / RAND_MAX;
-                block[bi * r + bk].im = (double)rand() / RAND_MAX;
+                block[bi * r + bk].re = (float)rand() / RAND_MAX;
+                block[bi * r + bk].im = (float)rand() / RAND_MAX;
             }
         }
     }
@@ -608,9 +609,9 @@ int main(int argc, char *argv[]) {
     for (uint64_t I = 0; I < num_block_rows; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
             if ((uint64_t)col_idx[j] == I) {  /* 对角块 I==J */
-                complex_double_t *block = &values[j * r * r];
+                complex_float_t *block = &values[j * r * r];
                 for (int bi = 0; bi < r; bi++) {
-                    block[bi * r + bi].im = 0.0;  /* 块内主对角线虚部置零 */
+                    block[bi * r + bi].im = 0.0f;  /* 块内主对角线虚部置零 */
                 }
             }
         }
