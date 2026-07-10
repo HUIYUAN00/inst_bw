@@ -123,8 +123,54 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
         y[i].im = 0.0;
     }
 
+    /* ===== 第1趟: 对角块(I==J) =====
+     * 对角块本身为 Hermitian,仅内积: y[I*r+i] += a * x[I*r+k]
+     * 块行数据与向量按 [re,im,re,im,...] 交错存储,
+     * fcmla #0/#90 完成复数乘加,uzp1/uzp2 分离实虚部,faddv 归约。
+     */
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
+            if ((uint64_t)col_idx[j] != I) continue;
+            complex_double_t *block = &val[j * r * r];
+
+            for (int i = 0; i < r; i++) {
+                double *br = (double *)&block[i * r];
+                double *xr = (double *)&vec[I * r];
+                uint64_t total = (uint64_t)r * 2;
+                uint64_t off = 0;
+                double sum_re = 0.0, sum_im = 0.0;
+
+                while (off < total) {
+                    uint64_t cnt = (total - off < vl_doubles) ? (total - off) : vl_doubles;
+                    svuint64_t idx = svindex_u64(0, 1);
+                    svbool_t pgall = svptrue_b64();
+                    svbool_t pg = svcmplt_u64(pgall, idx, svdup_u64(cnt));
+                    svfloat64_t za = svld1_f64(pg, br + off);
+                    svfloat64_t zx = svld1_f64(pg, xr + off);
+                    svfloat64_t zacc = svdup_f64(0.0);
+                    zacc = svcmla_f64_m(pg, zacc, za, zx, 0);
+                    zacc = svcmla_f64_m(pg, zacc, za, zx, 90);
+                    svfloat64_t zzero = svdup_f64(0.0);
+                    svfloat64_t zre = svuzp1_f64(zacc, zzero);
+                    svfloat64_t zim = svuzp2_f64(zacc, zzero);
+                    sum_re += svaddv_f64(pgall, zre);
+                    sum_im += svaddv_f64(pgall, zim);
+                    off += cnt;
+                }
+
+                y[I * r + i].re += sum_re;
+                y[I * r + i].im += sum_im;
+            }
+        }
+    }
+
+    /* ===== 第2趟: 上三角块(I<J)内积 =====
+     * y[I*r+i] += a * x[J*r+k],仅 col_idx > I 的块
+     * 处理同第1趟,区别在于 x 取自 vec[J*r] 而非 vec[I*r]
+     */
+    for (uint64_t I = 0; I < nbr; I++) {
+        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
+            if ((uint64_t)col_idx[j] <= I) continue;
             int32_t J = col_idx[j];
             complex_double_t *block = &val[j * r * r];
 
@@ -137,45 +183,44 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
 
                 while (off < total) {
                     uint64_t cnt = (total - off < vl_doubles) ? (total - off) : vl_doubles;
-                    double pre, pim;
-
-                    __asm__ volatile (
-                        "ptrue p2.b\n\t"
-                        "whilelt p1.d, xzr, %[cnt]\n\t"
-                        "ld1d z0.d, p1/z, [%[br], %[off], lsl #3]\n\t"
-                        "ld1d z1.d, p1/z, [%[xr], %[off], lsl #3]\n\t"
-                        "mov z2.d, #0\n\t"
-                        "fcmla z2.d, p1/m, z0.d, z1.d, #0\n\t"
-                        "fcmla z2.d, p1/m, z0.d, z1.d, #90\n\t"
-                        "mov z5.d, #0\n\t"
-                        "uzp1 z3.d, z2.d, z5.d\n\t"
-                        "uzp2 z4.d, z2.d, z5.d\n\t"
-                        "faddv d5, p2, z3.d\n\t"
-                        "faddv d6, p2, z4.d\n\t"
-                        "fmov %[pre], d5\n\t"
-                        "fmov %[pim], d6\n\t"
-                        : [pre] "=r"(pre), [pim] "=r"(pim)
-                        : [br] "r"(br), [xr] "r"(xr), [off] "r"(off), [cnt] "r"(cnt)
-                        : "p1", "p2", "z0", "z1", "z2", "z3", "z4", "z5", "d5", "d6", "memory"
-                    );
-
-                    sum_re += pre;
-                    sum_im += pim;
+                    svuint64_t idx = svindex_u64(0, 1);
+                    svbool_t pgall = svptrue_b64();
+                    svbool_t pg = svcmplt_u64(pgall, idx, svdup_u64(cnt));
+                    svfloat64_t za = svld1_f64(pg, br + off);
+                    svfloat64_t zx = svld1_f64(pg, xr + off);
+                    svfloat64_t zacc = svdup_f64(0.0);
+                    zacc = svcmla_f64_m(pg, zacc, za, zx, 0);
+                    zacc = svcmla_f64_m(pg, zacc, za, zx, 90);
+                    svfloat64_t zzero = svdup_f64(0.0);
+                    svfloat64_t zre = svuzp1_f64(zacc, zzero);
+                    svfloat64_t zim = svuzp2_f64(zacc, zzero);
+                    sum_re += svaddv_f64(pgall, zre);
+                    sum_im += svaddv_f64(pgall, zim);
                     off += cnt;
                 }
 
                 y[I * r + i].re += sum_re;
                 y[I * r + i].im += sum_im;
             }
+        }
+    }
 
-            if (I < J) {
-                complex_double_t *xi = &vec[I * r];
-                for (int k = 0; k < r; k++) {
-                    for (int i = 0; i < r; i++) {
-                        complex_double_t a = block[i * r + k];
-                        y[J * r + k].re += a.re * xi[i].re + a.im * xi[i].im;
-                        y[J * r + k].im += a.re * xi[i].im - a.im * xi[i].re;
-                    }
+    /* ===== 第3趟: 下三角贡献(I<J)外积 =====
+     * 利用共轭对称性: y[J*r+k] += conj(a) * x[I*r+i]
+     * conj(a)*x = (a.re*x.re + a.im*x.im) + (a.re*x.im - a.im*x.re)i
+     */
+    for (uint64_t I = 0; I < nbr; I++) {
+        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
+            if ((uint64_t)col_idx[j] <= I) continue;
+            int32_t J = col_idx[j];
+            complex_double_t *block = &val[j * r * r];
+            complex_double_t *xi = &vec[I * r];
+
+            for (int k = 0; k < r; k++) {
+                for (int i = 0; i < r; i++) {
+                    complex_double_t a = block[i * r + k];
+                    y[J * r + k].re += a.re * xi[i].re + a.im * xi[i].im;
+                    y[J * r + k].im += a.re * xi[i].im - a.im * xi[i].re;
                 }
             }
         }
