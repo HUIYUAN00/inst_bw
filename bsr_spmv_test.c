@@ -296,19 +296,14 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                  *
                  * 向量化策略: 固定 i, 遍历 k=0..r-1 (block第i行连续, y[J*r]连续)
                  *   block[i][k] 连续存储, svld1 加载
-                 *   x[I*r+i] 是标量, 分离为 xre/xim 后广播
+                 *   x[I*r+i] 视为 64-bit (re,im 打包), svdup_u64 广播为 [re,im,re,im,...]
                  *   y[J*r+k] 连续, svld1 加载 / svst1 存回
                  *
-                 * conj(a)*x 实现 (分离实虚部 + svmla):
-                 *   分离: are = svuzp1(za, 0) = [ar,0,ar,0,...]
-                 *         aim = svuzp2(za, 0) = [ai,0,ai,0,...]
-                 *   实部lane: y_re += ar*xre + ai*xim
-                 *   虚部lane: y_im += ar*xim - ai*xre
-                 *   合计: conj(a)*x = (ar*xre+ai*xim) + (ar*xim-ai*xre)i ✓
-                 *   最后 svzip1 交错合并回 [re,im,re,im,...] 写回。
-                 *
-                 * 注: 此处用 svmla+uzp 方式因所有 lane 均参与(全谓词 pg),
-                 *     无需部分谓词,UZP1 重排不影响正确性。 */
+                 * conj(a)*x 实现 (FCMLA #0 + #270):
+                 *   zx_bcast = [xre, xim, xre, xim, ...] (svdup_u64 广播)
+                 *   FCMLA #0:   [re += ar*xre,    im += ar*xim]
+                 *   FCMLA #270: [re += ai*xim,    im += -ai*xre]
+                 *   合计: re += ar*xre+ai*xim, im += ar*xim-ai*xre ✓ = conj(a)*x */
                 complex_float_t *xi = &vec[I * r];
                 complex_float_t *yk = &y[J * r];
 
@@ -318,8 +313,10 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                     uint64_t total = (uint64_t)r * 2;
                     uint64_t off = 0;
 
-                    float xre = xi[i].re;
-                    float xim = xi[i].im;
+                    /* x[i] 视为 64-bit (re,im 打包), dup 广播到整个寄存器
+                     * svdup_u64 → [re,im,re,im,...] (64-bit lane = 1 个复数)
+                     * svreinterpret_f32 转为 float32 视角,直接用于 FCMLA */
+                    svfloat32_t zx_bcast = svreinterpret_f32_u64(svdup_u64(*(uint64_t *)&xi[i]));
 
                     while (off < total) {
                         uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
@@ -329,23 +326,9 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                         svfloat32_t za = svld1_f32(pg, br + off);
                         svfloat32_t zy = svld1_f32(pg, yr + off);
 
-                        /* 分离 a 的实部(偶数lane)和虚部(奇数lane) */
-                        svfloat32_t zzero = svdup_f32(0.0f);
-                        svfloat32_t are = svuzp1_f32(za, zzero);  /* [ar,0,ar,0,...] */
-                        svfloat32_t aim = svuzp2_f32(za, zzero);  /* [ai,0,ai,0,...] */
+                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 0);    /* re += ar*xre, im += ar*xim */
+                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 270);  /* re += ai*xim, im += -ai*xre */
 
-                        /* y_re (偶数lane) += ar*xre + ai*xim */
-                        svfloat32_t zyre = svuzp1_f32(zy, zzero);
-                        zyre = svmla_f32_m(pg, zyre, are, svdup_f32(xre));
-                        zyre = svmla_f32_m(pg, zyre, aim, svdup_f32(xim));
-
-                        /* y_im (奇数lane) += ar*xim - ai*xre */
-                        svfloat32_t zyim = svuzp2_f32(zy, zzero);
-                        zyim = svmla_f32_m(pg, zyim, are, svdup_f32(xim));
-                        zyim = svmla_f32_m(pg, zyim, aim, svdup_f32(-xre));
-
-                        /* 交错合并回 [re,im,re,im,...] 写回 */
-                        zy = svzip1_f32(zyre, zyim);
                         svst1_f32(pg, yr + off, zy);
                         off += cnt;
                     }
