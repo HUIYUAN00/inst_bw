@@ -170,15 +170,33 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                  *         bk=0      bk=1      bk=2      bk=3
                  *   bi=0  [a00r a00i][a01r a01i][a02r a02i][a03r a03i]  ← 全部上三角
                  *   bi=1  [a10r a10i][a11r a11i][a12r a12i][a13r a13i]  ← a10* 已跳过,仅 a11+ 上三角
-                 *   bi=2  [a20r a20i][a21r a21i][a22r a22i][a23r a23i]  ← a20*,a21* 跳过,仅 a22+ 上三角
+                 *   bi=2  [a20r a20i][a21r a21i][a22r a22i][a23r a03i]  ← a20*,a21* 跳过,仅 a22+ 上三角
                  *   bi=3  [a30r a30i][a31r a31i][a32r a32i][a33r a33i]  ← 仅 a33 上三角
                  *
-                 * 对每个 bi 行:
-                 *   (1) 内积: 遍历 bk=bi..r-1, y[bi] += block[bi][bk] * x[bk]
-                 *       谓词 pg_upper 选择 bk>=bi 的 lane (float偏移 >= 2*bi)
-                 *   (2) 外积: 遍历 bk=bi+1..r-1, y[k] += conj(block[bi][bk]) * x[bi]
-                 *       (即利用上三角数据 block[bi][bk] 计算下三角 block[bk][bi] 的共轭贡献)
-                 *       谓词 pg_strict 选择 bk>bi 的 lane (float偏移 >= 2*(bi+1))
+                 * Hermitian性质: block[bk][bi] = conj(block[bi][bk])
+                 *   对角线(bi==bk): block[bi][bi] 为实数(虚部=0)
+                 *   下三角(bi>bk): 可由上三角共轭推导,无需存储
+                 *
+                 * 融合计算: 对每个 bi 行,单次遍历 bk=0..r-1, block数据仅加载一次,
+                 *           同时完成上三角内积和下三角外积贡献:
+                 *
+                 *   (1) 内积(bk>=bi): y[bi] += block[bi][bk] * x[bk]
+                 *       谓词 pg_upper 选择 bk>=bi 的复数对 (float偏移 >= 2*bi)
+                 *       svcmla #0 + #90 完成复数乘法 a*x, 累加到 zacc
+                 *       循环结束后统一归约 zacc → y[bi]
+                 *
+                 *   (2) 外积(bk>bi): y[bk] += conj(block[bi][bk]) * x[bi]
+                 *       (利用上三角数据 block[bi][bk] 计算下三角 block[bk][bi] 的共轭贡献)
+                 *       谓词 pg_strict 选择 bk>bi 的复数对 (float偏移 >= 2*(bi+1))
+                 *       x[bi] 广播为 zx_bcast = [xre,xim,xre,xim,...]
+                 *       svcmla #0 + #270 计算 conj(a)*x:
+                 *         #0:   [re += ar*xre,    im += ar*xim]
+                 *         #270: [re += ai*xim,    im += -ai*xre]
+                 *         合计: re += ar*xre+ai*xim, im += ar*xim-ai*xre ✓
+                 *       原地读改写 zy, 仅写回 pg_strict lane
+                 *
+                 * 注: 外积用 FCMLA 而非 svmla+uzp1/uzp2,因 FCMLA 在原始交错布局上
+                 *     直接运算,谓词 pg_strict 能正确对应到原始 lane 位置。
                  * ============================================================ */
                 complex_float_t *xi = &vec[I * r];
                 complex_float_t *yi = &y[I * r];
@@ -189,29 +207,20 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                     float *xr = (float *)xi;               /* x向量, float视角 */
                     float *yr = (float *)yi;               /* y向量, float视角 */
 
-                    /* 构造外积广播向量 zx_bcast = [xre, xim, xre, xim, ...] */
+                    /* 外积广播向量: x[bi] → [xre, xim, xre, xim, ...] */
                     float xre = xi[bi].re;
                     float xim = xi[bi].im;
                     svfloat32_t zx_bcast = svzip1_f32(svdup_f32(xre), svdup_f32(xim));
 
-                    /* 内积累加器,跨 while 迭代累加,循环结束后统一归约 */
+                    /* 内积累加器: 跨 while 迭代累加,循环结束后统一归约 */
                     svfloat32_t zacc = svdup_f32(0.0f);
 
-                    /* ===== 融合循环: 内积 + 外积, block 数据仅加载一次 =====
-                     *
-                     * 每次迭代加载 za(block行) 和 zx(向量x) 各一次:
-                     *   (1) 内积(bk>=bi): zacc += za * zx,  用 pg_upper 谓词
-                     *       svcmla #0 + #90 完成复数乘法,累积到 zacc
-                     *   (2) 外积(bk>bi):  zy += conj(za) * x[bi],  用 pg_strict 谓词
-                     *       zx_bcast 广播 x[bi], svcmla #0 + #270 计算 conj(a)*x
-                     *       原地读改写 zy, 仅写回 pg_strict lane
-                     */
                     uint64_t off = 0;
                     while (off < total) {
                         uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
                         svbool_t pgall = svptrue_b32();
                         svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
-                        /* pg_upper: 绝对偏移 >= 2*bi, 即 bk>=bi; pg_strict: >= 2*(bi+1), 即 bk>bi */
+                        /* pg_upper: 绝对偏移 >= 2*bi → bk>=bi; pg_strict: >= 2*(bi+1) → bk>bi */
                         svbool_t pg_upper = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * bi));
                         svbool_t pg_strict = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * (bi + 1)));
 
@@ -219,11 +228,11 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                         svfloat32_t za = svld1_f32(pg, br + off);
                         svfloat32_t zx = svld1_f32(pg, xr + off);
 
-                        /* (1) 内积: y[bi] += a * x[bk] (bk>=bi), 累加到 zacc */
-                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 0);
-                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 90);
+                        /* (1) 内积(bk>=bi): zacc += a * x[bk], 累加到 zacc */
+                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 0);   /* 实部交叉项 */
+                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 90);  /* 虚部交叉项 */
 
-                        /* (2) 外积: y[bk] += conj(a) * x[bi] (bk>bi), 原地更新 zy */
+                        /* (2) 外积(bk>bi): y[bk] += conj(a) * x[bi], 原地读改写 zy */
                         svfloat32_t zy = svld1_f32(pg, yr + off);
                         zy = svcmla_f32_m(pg_strict, zy, za, zx_bcast, 0);    /* re += ar*xre, im += ar*xim */
                         zy = svcmla_f32_m(pg_strict, zy, za, zx_bcast, 270);  /* re += ai*xim, im += -ai*xre */
@@ -232,11 +241,11 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                         off += cnt;
                     }
 
-                    /* 内积累加器归约: zacc → sum_re, sum_im → y[bi] */
+                    /* 内积累加器归约: zacc=[re,im,re,im,...] → sum_re, sum_im → y[bi] */
                     svbool_t pgall = svptrue_b32();
                     svfloat32_t zzero = svdup_f32(0.0f);
-                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
-                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                    svfloat32_t zre = svuzp1_f32(zacc, zzero);  /* 提取偶数lane(实部累加) */
+                    svfloat32_t zim = svuzp2_f32(zacc, zzero);  /* 提取奇数lane(虚部累加) */
                     yi[bi].re += svaddv_f32(pgall, zre);
                     yi[bi].im += svaddv_f32(pgall, zim);
                 }
