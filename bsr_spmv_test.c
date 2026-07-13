@@ -189,71 +189,56 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                     float *xr = (float *)xi;               /* x向量, float视角 */
                     float *yr = (float *)yi;               /* y向量, float视角 */
 
-                    /* ---- (1) 对角线上(bi<=bk)内积: y[bi] += a * x[bk] ----
-                     * 只需 bk>=bi 的元素参与累加。
-                     * pg_upper: lane偏移(off+idx) >= 2*bi 时激活,选择 bk>=bi
-                     * svcmla #0 + #90 完成完整复数乘法 a*x
-                     * svuzp1/svuzp2 分离实虚部, svaddv 归约 */
-                    float sum_re = 0.0f, sum_im = 0.0f;
+                    /* 构造外积广播向量 zx_bcast = [xre, xim, xre, xim, ...] */
+                    float xre = xi[bi].re;
+                    float xim = xi[bi].im;
+                    svfloat32_t zx_bcast = svzip1_f32(svdup_f32(xre), svdup_f32(xim));
+
+                    /* 内积累加器,跨 while 迭代累加,循环结束后统一归约 */
+                    svfloat32_t zacc = svdup_f32(0.0f);
+
+                    /* ===== 融合循环: 内积 + 外积, block 数据仅加载一次 =====
+                     *
+                     * 每次迭代加载 za(block行) 和 zx(向量x) 各一次:
+                     *   (1) 内积(bk>=bi): zacc += za * zx,  用 pg_upper 谓词
+                     *       svcmla #0 + #90 完成复数乘法,累积到 zacc
+                     *   (2) 外积(bk>bi):  zy += conj(za) * x[bi],  用 pg_strict 谓词
+                     *       zx_bcast 广播 x[bi], svcmla #0 + #270 计算 conj(a)*x
+                     *       原地读改写 zy, 仅写回 pg_strict lane
+                     */
                     uint64_t off = 0;
                     while (off < total) {
                         uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
                         svbool_t pgall = svptrue_b32();
                         svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
-                        /* pg_upper = pg ∧ (绝对偏移 >= 2*bi), 即只激活 bk>=bi 的复数对 */
+                        /* pg_upper: 绝对偏移 >= 2*bi, 即 bk>=bi; pg_strict: >= 2*(bi+1), 即 bk>bi */
                         svbool_t pg_upper = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * bi));
-
-                        svfloat32_t za = svld1_f32(pg, br + off);
-                        svfloat32_t zx = svld1_f32(pg, xr + off);
-                        svfloat32_t zacc = svdup_f32(0.0f);
-                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 0);   /* 实部交叉项 */
-                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 90);  /* 虚部交叉项 */
-                        svfloat32_t zzero = svdup_f32(0.0f);
-                        svfloat32_t zre = svuzp1_f32(zacc, zzero);  /* 提取偶数lane(实部累加) */
-                        svfloat32_t zim = svuzp2_f32(zacc, zzero);  /* 提取奇数lane(虚部累加) */
-                        sum_re += svaddv_f32(pgall, zre);
-                        sum_im += svaddv_f32(pgall, zim);
-                        off += cnt;
-                    }
-                    yi[bi].re += sum_re;
-                    yi[bi].im += sum_im;
-
-                    /* ---- (2) 对角线下(bi<bk)外积: y[bk] += conj(a) * x[bi] ----
-                     * Hermitian性质: block[bk][bi] = conj(block[bi][bk])
-                     * 因此下三角贡献 y[bk] += conj(block[bi][bk]) * x[bi],数据从上三角读取。
-                     * 只需 bk>bi 的元素参与。
-                     * pg_strict: lane偏移(off+idx) >= 2*(bi+1) 时激活,选择 bk>bi
-                     *
-                     * conj(a)*x 的 SVE实现:
-                     *   x = xre + xim*i, 构造广播向量 zx = [xre, xim, xre, xim, ...]
-                     *   a = [ar, ai, ar, ai, ...] (交错布局)
-                     *   FCMLA #0:   [re += ar*xre,           im += ar*xim         ]
-                     *   FCMLA #270: [re += ai*xim,           im += -ai*xre        ]
-                     *   合计: re += ar*xre + ai*xim,  im += ar*xim - ai*xre  ✓ = conj(a)*x
-                     *
-                     * 注: 此处用 FCMLA 而非 svmla+uzp1/uzp2,因 FCMLA 在原始交错布局上
-                     *     直接运算,谓词 pg_strict 能正确对应到原始 lane 位置。 */
-                    float xre = xi[bi].re;
-                    float xim = xi[bi].im;
-                    /* 构造 [xre, xim, xre, xim, ...] 广播向量 */
-                    svfloat32_t zx = svzip1_f32(svdup_f32(xre), svdup_f32(xim));
-                    off = 0;
-                    while (off < total) {
-                        uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
-                        svbool_t pgall = svptrue_b32();
-                        svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
-                        /* pg_strict = pg ∧ (绝对偏移 >= 2*(bi+1)), 即只激活 bk>bi 的复数对 */
                         svbool_t pg_strict = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * (bi + 1)));
 
-                        svfloat32_t za = svld1_f32(pg, br + off);  /* block第bi行数据 [ar,ai,ar,ai,...] */
-                        svfloat32_t zy = svld1_f32(pg, yr + off);  /* y向量,读改写 */
+                        /* block 第bi行数据仅加载一次,内积外积共用 */
+                        svfloat32_t za = svld1_f32(pg, br + off);
+                        svfloat32_t zx = svld1_f32(pg, xr + off);
 
-                        zy = svcmla_f32_m(pg_strict, zy, za, zx, 0);    /* re += ar*xre, im += ar*xim */
-                        zy = svcmla_f32_m(pg_strict, zy, za, zx, 270);  /* re += ai*xim, im += -ai*xre */
+                        /* (1) 内积: y[bi] += a * x[bk] (bk>=bi), 累加到 zacc */
+                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 0);
+                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 90);
 
-                        svst1_f32(pg_strict, yr + off, zy);  /* 仅写回 bk>bi 的 lane */
+                        /* (2) 外积: y[bk] += conj(a) * x[bi] (bk>bi), 原地更新 zy */
+                        svfloat32_t zy = svld1_f32(pg, yr + off);
+                        zy = svcmla_f32_m(pg_strict, zy, za, zx_bcast, 0);    /* re += ar*xre, im += ar*xim */
+                        zy = svcmla_f32_m(pg_strict, zy, za, zx_bcast, 270);  /* re += ai*xim, im += -ai*xre */
+                        svst1_f32(pg_strict, yr + off, zy);
+
                         off += cnt;
                     }
+
+                    /* 内积累加器归约: zacc → sum_re, sum_im → y[bi] */
+                    svbool_t pgall = svptrue_b32();
+                    svfloat32_t zzero = svdup_f32(0.0f);
+                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                    yi[bi].re += svaddv_f32(pgall, zre);
+                    yi[bi].im += svaddv_f32(pgall, zim);
                 }
             } else {
                 /* ============================================================
