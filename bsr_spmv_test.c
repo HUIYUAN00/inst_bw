@@ -123,104 +123,153 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
         y[i].im = 0.0f;
     }
 
-    /* ===== 第1趟: 对角块(I==J) =====
-     * 对角块本身为 Hermitian,仅内积: y[I*r+i] += a * x[I*r+k]
+    /* ===== 单趟遍历: 行主序外层循环,逐块识别对角/上三角 =====
+     *
+     * 对角块(I==J): 块本身为Hermitian,仅读取块内上三角(bi<=bk)
+     *   对角线上(bi<=bk)做内积: y[I*r+bi] += a * x[I*r+bk]
+     *   对角线下(bi>bk)做外积: y[I*r+bk] += conj(a) * x[I*r+bi]
+     *
+     * 上三角块(I<J):
+     *   内积: y[I*r+i] += a * x[J*r+k]            (非对角块数据乘向量)
+     *   外积: y[J*r+k] += conj(a) * x[I*r+i]      (共轭转置乘向量,下三角贡献)
+     *
      * 块行数据与向量按 [re,im,re,im,...] 交错存储,
      * fcmla #0/#90 完成复数乘加,uzp1/uzp2 分离实虚部,faddv 归约。
      */
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
-            if ((uint64_t)col_idx[j] != I) continue;
-            complex_float_t *block = &val[j * r * r];
-
-            for (int i = 0; i < r; i++) {
-                float *br = (float *)&block[i * r];
-                float *xr = (float *)&vec[I * r];
-                uint64_t total = (uint64_t)r * 2;
-                uint64_t off = 0;
-                float sum_re = 0.0f, sum_im = 0.0f;
-
-                while (off < total) {
-                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
-                    svuint32_t idx = svindex_u32(0, 1);
-                    svbool_t pgall = svptrue_b32();
-                    svbool_t pg = svcmplt_u32(pgall, idx, svdup_u32(cnt));
-                    svfloat32_t za = svld1_f32(pg, br + off);
-                    svfloat32_t zx = svld1_f32(pg, xr + off);
-                    svfloat32_t zacc = svdup_f32(0.0f);
-                    zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
-                    zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
-                    svfloat32_t zzero = svdup_f32(0.0f);
-                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
-                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
-                    sum_re += svaddv_f32(pgall, zre);
-                    sum_im += svaddv_f32(pgall, zim);
-                    off += cnt;
-                }
-
-                y[I * r + i].re += sum_re;
-                y[I * r + i].im += sum_im;
-            }
-        }
-    }
-
-    /* ===== 第2趟: 上三角块(I<J)内积 =====
-     * y[I*r+i] += a * x[J*r+k],仅 col_idx > I 的块
-     * 处理同第1趟,区别在于 x 取自 vec[J*r] 而非 vec[I*r]
-     */
-    for (uint64_t I = 0; I < nbr; I++) {
-        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
-            if ((uint64_t)col_idx[j] <= I) continue;
             int32_t J = col_idx[j];
             complex_float_t *block = &val[j * r * r];
 
-            for (int i = 0; i < r; i++) {
-                float *br = (float *)&block[i * r];
-                float *xr = (float *)&vec[J * r];
+            if ((uint64_t)J == I) {
+                /* --- 对角块: 块内Hermitian,仅读上三角(bi<=bk) --- */
+                complex_float_t *xi = &vec[I * r];
+                complex_float_t *yi = &y[I * r];
                 uint64_t total = (uint64_t)r * 2;
-                uint64_t off = 0;
-                float sum_re = 0.0f, sum_im = 0.0f;
 
-                while (off < total) {
-                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
-                    svuint32_t idx = svindex_u32(0, 1);
-                    svbool_t pgall = svptrue_b32();
-                    svbool_t pg = svcmplt_u32(pgall, idx, svdup_u32(cnt));
-                    svfloat32_t za = svld1_f32(pg, br + off);
-                    svfloat32_t zx = svld1_f32(pg, xr + off);
-                    svfloat32_t zacc = svdup_f32(0.0f);
-                    zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
-                    zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
-                    svfloat32_t zzero = svdup_f32(0.0f);
-                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
-                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
-                    sum_re += svaddv_f32(pgall, zre);
-                    sum_im += svaddv_f32(pgall, zim);
-                    off += cnt;
+                for (int bi = 0; bi < r; bi++) {
+                    float *br = (float *)&block[bi * r];
+                    float *xr = (float *)xi;
+                    float *yr = (float *)yi;
+
+                    /* 对角线上(bi<=bk)内积: y[bi] += a * x[k] */
+                    float sum_re = 0.0f, sum_im = 0.0f;
+                    uint64_t off = 0;
+                    while (off < total) {
+                        uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                        svbool_t pgall = svptrue_b32();
+                        svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
+                        svbool_t pg_upper = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * bi));
+
+                        svfloat32_t za = svld1_f32(pg, br + off);
+                        svfloat32_t zx = svld1_f32(pg, xr + off);
+                        svfloat32_t zacc = svdup_f32(0.0f);
+                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 0);
+                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 90);
+                        svfloat32_t zzero = svdup_f32(0.0f);
+                        svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                        svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                        sum_re += svaddv_f32(pgall, zre);
+                        sum_im += svaddv_f32(pgall, zim);
+                        off += cnt;
+                    }
+                    yi[bi].re += sum_re;
+                    yi[bi].im += sum_im;
+
+                    /* 对角线下(bi>bk)外积: y[k] += conj(a) * x[bi] (k>bi)
+                     * conj(a)*x = (ar*xre + ai*xim) + (ar*xim - ai*xre)i
+                     * FCMLA #0:   [re+=ar*xre, im+=ar*xim]
+                     * FCMLA #270: [re+=ai*xim, im+=-ai*xre]
+                     * 合计: re = ar*xre + ai*xim, im = ar*xim - ai*xre ✓ */
+                    float xre = xi[bi].re;
+                    float xim = xi[bi].im;
+                    svfloat32_t zx = svzip1_f32(svdup_f32(xre), svdup_f32(xim));
+                    off = 0;
+                    while (off < total) {
+                        uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                        svbool_t pgall = svptrue_b32();
+                        svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
+                        svbool_t pg_strict = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * (bi + 1)));
+
+                        svfloat32_t za = svld1_f32(pg, br + off);
+                        svfloat32_t zy = svld1_f32(pg, yr + off);
+
+                        zy = svcmla_f32_m(pg_strict, zy, za, zx, 0);
+                        zy = svcmla_f32_m(pg_strict, zy, za, zx, 270);
+
+                        svst1_f32(pg_strict, yr + off, zy);
+                        off += cnt;
+                    }
                 }
-
-                y[I * r + i].re += sum_re;
-                y[I * r + i].im += sum_im;
-            }
-        }
-    }
-
-    /* ===== 第3趟: 下三角贡献(I<J)外积 =====
-     * 利用共轭对称性: y[J*r+k] += conj(a) * x[I*r+i]
-     * conj(a)*x = (a.re*x.re + a.im*x.im) + (a.re*x.im - a.im*x.re)i
-     */
-    for (uint64_t I = 0; I < nbr; I++) {
-        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
-            if ((uint64_t)col_idx[j] <= I) continue;
-            int32_t J = col_idx[j];
-            complex_float_t *block = &val[j * r * r];
-            complex_float_t *xi = &vec[I * r];
-
-            for (int k = 0; k < r; k++) {
+            } else {
+                /* --- 上三角块(I<J): 内积 + 外积 --- */
+                /* 内积: y[I*r+i] += a * x[J*r+k] */
                 for (int i = 0; i < r; i++) {
-                    complex_float_t a = block[i * r + k];
-                    y[J * r + k].re += a.re * xi[i].re + a.im * xi[i].im;
-                    y[J * r + k].im += a.re * xi[i].im - a.im * xi[i].re;
+                    float *br = (float *)&block[i * r];
+                    float *xr = (float *)&vec[J * r];
+                    uint64_t total = (uint64_t)r * 2;
+                    uint64_t off = 0;
+                    float sum_re = 0.0f, sum_im = 0.0f;
+
+                    while (off < total) {
+                        uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                        svuint32_t idx = svindex_u32(0, 1);
+                        svbool_t pgall = svptrue_b32();
+                        svbool_t pg = svcmplt_u32(pgall, idx, svdup_u32(cnt));
+                        svfloat32_t za = svld1_f32(pg, br + off);
+                        svfloat32_t zx = svld1_f32(pg, xr + off);
+                        svfloat32_t zacc = svdup_f32(0.0f);
+                        zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
+                        zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
+                        svfloat32_t zzero = svdup_f32(0.0f);
+                        svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                        svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                        sum_re += svaddv_f32(pgall, zre);
+                        sum_im += svaddv_f32(pgall, zim);
+                        off += cnt;
+                    }
+
+                    y[I * r + i].re += sum_re;
+                    y[I * r + i].im += sum_im;
+                }
+
+                /* 外积: y[J*r+k] += conj(a) * x[I*r+i] */
+                complex_float_t *xi = &vec[I * r];
+                complex_float_t *yk = &y[J * r];
+
+                for (int i = 0; i < r; i++) {
+                    float *br = (float *)&block[i * r];
+                    float *yr = (float *)yk;
+                    uint64_t total = (uint64_t)r * 2;
+                    uint64_t off = 0;
+
+                    float xre = xi[i].re;
+                    float xim = xi[i].im;
+
+                    while (off < total) {
+                        uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                        svbool_t pgall = svptrue_b32();
+                        svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
+
+                        svfloat32_t za = svld1_f32(pg, br + off);
+                        svfloat32_t zy = svld1_f32(pg, yr + off);
+
+                        svfloat32_t zzero = svdup_f32(0.0f);
+                        svfloat32_t are = svuzp1_f32(za, zzero);
+                        svfloat32_t aim = svuzp2_f32(za, zzero);
+
+                        svfloat32_t zyre = svuzp1_f32(zy, zzero);
+                        zyre = svmla_f32_m(pg, zyre, are, svdup_f32(xre));
+                        zyre = svmla_f32_m(pg, zyre, aim, svdup_f32(xim));
+
+                        svfloat32_t zyim = svuzp2_f32(zy, zzero);
+                        zyim = svmla_f32_m(pg, zyim, are, svdup_f32(xim));
+                        zyim = svmla_f32_m(pg, zyim, aim, svdup_f32(-xre));
+
+                        zy = svzip1_f32(zyre, zyim);
+                        svst1_f32(pg, yr + off, zy);
+                        off += cnt;
+                    }
                 }
             }
         }
@@ -596,22 +645,23 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* ===== 阶段5: Hermitian 约束——对角块对角线虚部置零 =====
+    /* ===== 阶段5: Hermitian 约束——对角块强制Hermitian对称 =====
      *
-     * Hermitian 矩阵要求 A[i][i] 为实数(虚部=0)。
-     * 在块级别: 对角块(I==J)的块内对角元素(bi==bk)虚部必须为 0。
-     * 遍历所有对角块,将 block[bi*r + bi].im 置零,实部保持不变。
-     * 非对角块和非对角元素不受影响。
-     *
-     * 注: 此处仅置零对角线虚部,不做共轭对称填充。
-     *     上三角块存储原始值,下三角贡献在 SpMV 中通过共轭计算。
+     * Hermitian 矩阵要求对角块(I==J)本身为 Hermitian:
+     *   block[bi][bk] = conj(block[bk][bi]), 且 block[bi][bi] 为实数。
+     * 遍历所有对角块,将块内下三角填充为上三角的共轭,对角线虚部置零。
+     * 非对角块不受影响。
      */
     for (uint64_t I = 0; I < num_block_rows; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
             if ((uint64_t)col_idx[j] == I) {  /* 对角块 I==J */
                 complex_float_t *block = &values[j * r * r];
                 for (int bi = 0; bi < r; bi++) {
-                    block[bi * r + bi].im = 0.0f;  /* 块内主对角线虚部置零 */
+                    block[bi * r + bi].im = 0.0f;  /* 对角线虚部置零 */
+                    for (int bk = bi + 1; bk < r; bk++) {
+                        block[bk * r + bi].re = block[bi * r + bk].re;   /* 下三角 = 上三角共轭 */
+                        block[bk * r + bi].im = -block[bi * r + bk].im;
+                    }
                 }
             }
         }
