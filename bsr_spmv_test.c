@@ -188,7 +188,7 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                  *   (2) 外积(bk>bi): y[bk] += conj(block[bi][bk]) * x[bi]
                  *       (利用上三角数据 block[bi][bk] 计算下三角 block[bk][bi] 的共轭贡献)
                  *       谓词 pg_strict 选择 bk>bi 的复数对 (float偏移 >= 2*(bi+1))
-                 *       x[bi] 视为 64-bit (re,im 打包), svdup_u64 广播为 [re,im,re,im,...]
+                 *       x[bi] 广播为 zx_bcast = [xre,xim,xre,xim,...]
                  *       svcmla #0 + #270 计算 conj(a)*x:
                  *         #0:   [re += ar*xre,    im += ar*xim]
                  *         #270: [re += ai*xim,    im += -ai*xre]
@@ -207,10 +207,10 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                     float *xr = (float *)xi;               /* x向量, float视角 */
                     float *yr = (float *)yi;               /* y向量, float视角 */
 
-                    /* 外积广播向量: x[bi] 视为 64-bit (re,im 打包), dup 广播到整个寄存器
-                     * svdup_u64 → [re,im,re,im,...] (64-bit lane = 1 个复数)
-                     * svreinterpret_f32 转为 float32 视角,直接用于 FCMLA */
-                    svfloat32_t zx_bcast = svreinterpret_f32_u64(svdup_u64(*(uint64_t *)&xi[bi]));
+                    /* 外积广播向量: x[bi] → [xre, xim, xre, xim, ...] */
+                    float xre = xi[bi].re;
+                    float xim = xi[bi].im;
+                    svfloat32_t zx_bcast = svzip1_f32(svdup_f32(xre), svdup_f32(xim));
 
                     /* 内积累加器: 跨 while 迭代累加,循环结束后统一归约 */
                     svfloat32_t zacc = svdup_f32(0.0f);
