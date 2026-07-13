@@ -13,7 +13,7 @@
 
 static int warmup_iter = 5;
 static int test_iter = 10;
-static uint64_t matrix_size = 1024;
+static uint64_t matrix_size = 256;  /* 矩阵某维度上 block 的个数 (实际矩阵维度 = matrix_size * block_size) */
 static int block_size = 4;
 static double sparsity = 0.1;
 static unsigned int random_seed = 42;
@@ -73,9 +73,9 @@ static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vecto
     complex_float_t *vec = (complex_float_t *)vector_ptr;
     complex_float_t *y = (complex_float_t *)result_ptr;
     int r = block_size;
-    uint64_t nbr = matrix_size / r;
+    uint64_t nbr = matrix_size;
 
-    for (uint64_t i = 0; i < matrix_size; i++) {
+    for (uint64_t i = 0; i < matrix_size * r; i++) {
         y[i].re = 0.0f;
         y[i].im = 0.0f;
     }
@@ -160,11 +160,11 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
     complex_float_t *vec = (complex_float_t *)vector_ptr;
     complex_float_t *y = (complex_float_t *)result_ptr;
     int r = block_size;
-    uint64_t nbr = matrix_size / r;
+    uint64_t nbr = matrix_size;
     uint64_t vl_floats = svcntw();  /* SVE向量寄存器可容纳的float32数 */
 
     /* 清零结果向量 */
-    for (uint64_t i = 0; i < matrix_size; i++) {
+    for (uint64_t i = 0; i < matrix_size * r; i++) {
         y[i].re = 0.0f;
         y[i].im = 0.0f;
     }
@@ -354,7 +354,7 @@ static void print_usage(const char *prog_name) {
     printf("Usage: %s [options]\n", prog_name);
     printf("\nOptions:\n");
     printf("  -h, --help              Show this help message\n");
-    printf("  -M, --matrix-size <N>   Matrix dimension N (N x N) (default: 1024)\n");
+    printf("  -M, --matrix-size <N>   Number of blocks per dimension (default: 256)\n");
     printf("  -b, --block-size <r>    Block size r (r x r) (default: 4)\n");
     printf("  -s, --sparsity <ratio>  Block sparsity ratio 0.0-1.0 (default: 0.1)\n");
     printf("  -r, --random-seed <N>   Random seed (default: 42)\n");
@@ -404,7 +404,7 @@ static int verify_hemv(void *result_ptr, void *ref_ptr) {
     complex_float_t *y_ref = (complex_float_t *)ref_ptr;
     int errors = 0;
 
-    for (uint64_t i = 0; i < matrix_size && errors < 5; i++) {
+    for (uint64_t i = 0; i < matrix_size * block_size && errors < 5; i++) {
         float re_diff = fabsf(y[i].re - y_ref[i].re);
         float im_diff = fabsf(y[i].im - y_ref[i].im);
         float scale = fmaxf(fmaxf(fabsf(y_ref[i].re), fabsf(y_ref[i].im)), 1.0f);
@@ -519,10 +519,10 @@ int main(int argc, char *argv[]) {
         specs = &argv[argc - num_specs];
     }
 
-    if (matrix_size % block_size != 0) {
+    if (matrix_size < 1) {
         if (rank == 0) {
-            fprintf(stderr, "Error: matrix_size (%lu) must be divisible by block_size (%d)\n",
-                    matrix_size, block_size);
+            fprintf(stderr, "Error: matrix_size (%lu) must be >= 1\n",
+                    matrix_size);
         }
 #ifdef USE_MPI
         MPI_Finalize();
@@ -540,7 +540,8 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
 
-    uint64_t num_block_rows = matrix_size / block_size;
+    uint64_t num_block_rows = matrix_size;
+    uint64_t matrix_dim = matrix_size * block_size;
     uint64_t total_upper_blocks = num_block_rows * (num_block_rows + 1) / 2;
     nnz_blocks = (uint64_t)(total_upper_blocks * sparsity);
     if (nnz_blocks < num_block_rows) nnz_blocks = num_block_rows;
@@ -558,7 +559,7 @@ int main(int argc, char *argv[]) {
 #endif
         printf("================================================================================\n");
         printf("SVE Vector Length: %lu bytes (%lu bits)\n", vl, vl * 8);
-        printf("Matrix Size: %lu x %lu\n", matrix_size, matrix_size);
+        printf("Matrix Size: %lu x %lu (blocks: %lu x %lu)\n", matrix_dim, matrix_dim, matrix_size, matrix_size);
         printf("Block Size: %d x %d\n", block_size, block_size);
         printf("Num Block Rows: %lu\n", num_block_rows);
         printf("Upper Triangle Blocks: %lu\n", total_upper_blocks);
@@ -576,9 +577,9 @@ int main(int argc, char *argv[]) {
     if (posix_memalign((void**)&row_ptr, 64, (num_block_rows + 1) * sizeof(uint64_t)) != 0 ||
         posix_memalign((void**)&col_idx, 64, nnz_blocks * sizeof(int32_t)) != 0 ||
         posix_memalign((void**)&values, 64, nnz_elements * sizeof(complex_float_t)) != 0 ||
-        posix_memalign((void**)&vector, 64, matrix_size * sizeof(complex_float_t)) != 0 ||
-        posix_memalign((void**)&result, 64, matrix_size * sizeof(complex_float_t)) != 0 ||
-        posix_memalign((void**)&result_ref, 64, matrix_size * sizeof(complex_float_t)) != 0) {
+        posix_memalign((void**)&vector, 64, matrix_dim * sizeof(complex_float_t)) != 0 ||
+        posix_memalign((void**)&result, 64, matrix_dim * sizeof(complex_float_t)) != 0 ||
+        posix_memalign((void**)&result_ref, 64, matrix_dim * sizeof(complex_float_t)) != 0) {
 #ifdef USE_MPI
         fprintf(stderr, "[Rank %d] Failed to allocate aligned memory\n", rank);
         MPI_Abort(MPI_COMM_WORLD, 1);
@@ -590,14 +591,14 @@ int main(int argc, char *argv[]) {
 
     srand(random_seed);
 
-    for (uint64_t i = 0; i < matrix_size; i++) {
+    for (uint64_t i = 0; i < matrix_dim; i++) {
         vector[i].re = (float)rand() / RAND_MAX;
         vector[i].im = (float)rand() / RAND_MAX;
     }
 
     /* ===== 阶段1：在上三角块网格中随机采样非零块位置 =====
      *
-     * 原始 N×N 矩阵被划分为 nbr×nbr 的块网格(nbr = N/r),每块 r×r 元素。
+     * 矩阵被划分为 nbr×nbr 的块网格(nbr = matrix_size),每块 r×r 元素。
      * Hermitian 矩阵只需存储上三角块(I<=J),下三角通过共轭对称性推导。
      * 上三角块总数 = nbr*(nbr+1)/2,从中按 sparsity 比例采样 nnz_blocks 个。
      *
