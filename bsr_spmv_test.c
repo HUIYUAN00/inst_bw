@@ -54,9 +54,6 @@ static int compare_coord(const void *a, const void *b) {
     return (ca->col < cb->col) ? -1 : (ca->col > cb->col) ? 1 : 0;
 }
 
-#pragma GCC push_options
-#pragma GCC optimize ("O3")
-
 /*
  * BSR Hermitian SpMV: y = A*x (complex float)
  * 仅存储上三角块(I<=J),利用共轭对称性计算下三角贡献。
@@ -74,11 +71,6 @@ static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vecto
     complex_float_t *y = (complex_float_t *)result_ptr;
     int r = block_size;
     uint64_t nbr = matrix_size;
-
-    for (uint64_t i = 0; i < matrix_size * r; i++) {
-        y[i].re = 0.0f;
-        y[i].im = 0.0f;
-    }
 
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
@@ -163,12 +155,6 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
     uint64_t nbr = matrix_size;
     uint64_t vl_floats = svcntw();  /* SVE向量寄存器可容纳的float32数 */
 
-    /* 清零结果向量 */
-    for (uint64_t i = 0; i < matrix_size * r; i++) {
-        y[i].re = 0.0f;
-        y[i].im = 0.0f;
-    }
-
     /* ===== 单趟遍历: 行主序外层循环,逐块识别对角/上三角 ===== */
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
@@ -190,76 +176,69 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
                  *   对角线(bi==bk): block[bi][bi] 为实数(虚部=0)
                  *   下三角(bi>bk): 可由上三角共轭推导,无需存储
                  *
-                 * 循环结构: r维循环(bi)为外层, 向量化while循环(off)为内层。
-                 *   每轮 off 迭代加载 block第bi行(za) 和 x向量(zx) 各一次,
-                 *   内积外积融合处理,block数据不重复读取。
+                 * 循环结构: r维循环(bi)为外层, for(bj)循环为内层。
+                 *   对角线元素(bk==bi)单独标量处理: y[bi] += block[bi][bi] * x[bi]
+                 *   循环从 bj=bi+1 开始,每次步进 svcntd() 个复数(64-bit)元素,
+                 *   svwhilelt_b64(bj, r) 自动处理尾部不足一个寄存器的情况。
+                 *   循环内所有元素满足 bk>bi,内积外积使用相同谓词,无需区分 pg_upper/pg_strict。
                  *
-                 *   (1) 内积(bk>=bi): y[bi] += block[bi][bk] * x[bk]
-                 *       谓词 pg_upper 选择 bk>=bi 的复数对 (float偏移 >= 2*bi)
+                 *   (1) 内积(bk>bi): y[bi] += block[bi][bk] * x[bk]
                  *       svcmla #0 + #90 完成复数乘法 a*x, 累加到 zacc
                  *       循环结束后统一归约 zacc → y[bi]
                  *
                  *   (2) 外积(bk>bi): y[bk] += conj(block[bi][bk]) * x[bi]
-                 *       (利用上三角数据 block[bi][bk] 计算下三角 block[bk][bi] 的共轭贡献)
-                 *       谓词 pg_strict 选择 bk>bi 的复数对 (float偏移 >= 2*(bi+1))
                  *       x[bi] 视为 64-bit (re,im 打包), svdup_u64 广播为 [xre,xim,xre,xim,...]
                  *       svcmla #0 + #270 计算 conj(a)*x:
                  *         #0:   [re += ar*xre,    im += ar*xim]
                  *         #270: [re += ai*xim,    im += -ai*xre]
                  *         合计: re += ar*xre+ai*xim, im += ar*xim-ai*xre ✓
-                 *       原地读改写 zy, 仅写回 pg_strict lane
-                 *
-                 * 注: 外积用 FCMLA 而非 svmla+uzp1/uzp2,因 FCMLA 在原始交错布局上
-                 *     直接运算,谓词 pg_strict 能正确对应到原始 lane 位置。
+                 *       原地读改写 zy, 仅写回 pg 激活 lane
                  * ============================================================ */
                 complex_float_t *xi = &vec[I * r];
                 complex_float_t *yi = &y[I * r];
-                uint64_t total = (uint64_t)r * 2;  /* 块一行的 float 总数 (r个复数 × 2) */
 
                 for (int bi = 0; bi < r; bi++) {
-                    float *br = (float *)&block[bi * r];  /* block第bi行, float视角 */
-                    float *xr = (float *)xi;               /* x向量, float视角 */
-                    float *yr = (float *)yi;               /* y向量, float视角 */
+                    float *br = (float *)&block[bi * r];
+                    float *xr = (float *)xi;
+                    float *yr = (float *)yi;
 
-                    /* 外积广播向量: x[bi] 视为 64-bit (re,im 打包), dup 广播到整个寄存器
-                     * svdup_u64 → [re,im,re,im,...] (64-bit lane = 1 个复数)
-                     * svreinterpret_f32 转为 float32 视角,直接用于 FCMLA */
-                    svfloat32_t zx_bcast = svreinterpret_f32_u64(svdup_u64(*(uint64_t *)&xi[bi]));
+                    /* 对角线元素(bk==bi): 标量内积, block[bi][bi]为实数(虚部=0) */
+                    complex_float_t a_diag = block[bi * r + bi];
+                    yi[bi].re += a_diag.re * xi[bi].re;
+                    yi[bi].im += a_diag.re * xi[bi].im;
 
-                    /* 内积累加器: 跨 while 迭代累加,循环结束后统一归约 */
+                    /* 外积广播向量: x[bi] 视为 1 个 double (2个float=1个复数), svdup_f64 广播
+                     * reinterpret 为 f32 后 = [re,im,re,im,...], 直接用于 FCMLA */
+                    svfloat32_t zx_bcast = svreinterpret_f32_f64(svdup_f64(*(const double *)&xi[bi]));
+
+                    /* 内积累加器: 跨循环迭代累加,循环结束后统一归约 */
                     svfloat32_t zacc = svdup_f32(0.0f);
 
-                    uint64_t off = 0;
-                    while (off < total) {
-                        uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
-                        svbool_t pgall = svptrue_b32();
-                        svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
-                        /* pg_upper: 绝对偏移 >= 2*bi → bk>=bi; pg_strict: >= 2*(bi+1) → bk>bi */
-                        svbool_t pg_upper = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * bi));
-                        svbool_t pg_strict = svcmpge_u32(pg, svindex_u32(off, 1), svdup_u32(2 * (bi + 1)));
+                    /* 循环: bj从bi+1开始,每次处理svcntd()个复数(64-bit)元素
+                     * bj*2 为 float 偏移, svwhilelt_b32(bj*2, r*2) 生成32-bit谓词直接用于FCMLA */
+                    uint64_t vld = svcntd();
+                    for (int64_t bj = bi + 1; bj < r; bj += vld) {
+                        svbool_t pg = svwhilelt_b32(bj * 2, (int64_t)r * 2);
 
-                        /* block 第bi行数据仅加载一次,内积外积共用 */
-                        svfloat32_t za = svld1_f32(pg, br + off);
-                        svfloat32_t zx = svld1_f32(pg, xr + off);
+                        svfloat32_t za = svld1_f32(pg, br + bj * 2);
+                        svfloat32_t zx = svld1_f32(pg, xr + bj * 2);
 
-                        /* (1) 内积(bk>=bi): zacc += a * x[bk], 累加到 zacc */
-                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 0);   /* 实部交叉项 */
-                        zacc = svcmla_f32_m(pg_upper, zacc, za, zx, 90);  /* 虚部交叉项 */
+                        /* (1) 内积(bk>bi): zacc += a * x[bk] */
+                        zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
+                        zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
 
                         /* (2) 外积(bk>bi): y[bk] += conj(a) * x[bi], 原地读改写 zy */
-                        svfloat32_t zy = svld1_f32(pg, yr + off);
-                        zy = svcmla_f32_m(pg_strict, zy, za, zx_bcast, 0);    /* re += ar*xre, im += ar*xim */
-                        zy = svcmla_f32_m(pg_strict, zy, za, zx_bcast, 270);  /* re += ai*xim, im += -ai*xre */
-                        svst1_f32(pg_strict, yr + off, zy);
-
-                        off += cnt;
+                        svfloat32_t zy = svld1_f32(pg, yr + bj * 2);
+                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 0);
+                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 270);
+                        svst1_f32(pg, yr + bj * 2, zy);
                     }
 
                     /* 内积累加器归约: zacc=[re,im,re,im,...] → sum_re, sum_im → y[bi] */
                     svbool_t pgall = svptrue_b32();
                     svfloat32_t zzero = svdup_f32(0.0f);
-                    svfloat32_t zre = svuzp1_f32(zacc, zzero);  /* 提取偶数lane(实部累加) */
-                    svfloat32_t zim = svuzp2_f32(zacc, zzero);  /* 提取奇数lane(虚部累加) */
+                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
                     yi[bi].re += svaddv_f32(pgall, zre);
                     yi[bi].im += svaddv_f32(pgall, zim);
                 }
@@ -341,10 +320,7 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
     }
 }
 
-#pragma GCC pop_options
-
 static test_item_t test_registry[] = {
-    {"BSR Herm Scalar",     "HEMV", spmv_bsr_herm_scalar},
     {"BSR Herm SVE",        "HEMV", spmv_bsr_herm_sve},
 };
 
@@ -596,6 +572,15 @@ int main(int argc, char *argv[]) {
         vector[i].im = (float)rand() / RAND_MAX;
     }
 
+    /* 随机初始化 result/result_ref (相同值), 计算函数做 y += A*x 不再内部置零 */
+    for (uint64_t i = 0; i < matrix_dim; i++) {
+        result[i].re = (float)rand() / RAND_MAX;
+        result[i].im = (float)rand() / RAND_MAX;
+        result_ref[i] = result[i];
+    }
+    complex_float_t *result_init = (complex_float_t *)malloc(matrix_dim * sizeof(complex_float_t));
+    memcpy(result_init, result, matrix_dim * sizeof(complex_float_t));
+
     /* ===== 阶段1：在上三角块网格中随机采样非零块位置 =====
      *
      * 矩阵被划分为 nbr×nbr 的块网格(nbr = matrix_size),每块 r×r 元素。
@@ -737,7 +722,33 @@ int main(int argc, char *argv[]) {
 
     spmv_bsr_herm_scalar(result_ref, values, vector, nnz_blocks, 1.0);
 
+    /* ===== 正确性校验: 每个测试函数单独运行一次,与参考结果对比 ===== */
     if (rank == 0) {
+        printf("Correctness Verification:\n");
+        printf("================================================================================\n");
+    }
+
+    for (int i = 0; i < test_count; i++) {
+        if (!run_all && !should_run_test(i, num_specs, specs)) continue;
+
+        test_item_t *test = &test_registry[i];
+        memcpy(result, result_init, matrix_dim * sizeof(complex_float_t));
+        test->func(result, values, vector, nnz_blocks, 1.0);
+        int verify_result = verify_hemv(result, result_ref);
+
+        if (rank == 0) {
+            printf("  %-38s ", test->name);
+            if (verify_result > 0) {
+                printf("FAIL(%d)\n", verify_result);
+            } else {
+                printf("PASS\n");
+            }
+        }
+    }
+
+    /* ===== 性能测试 ===== */
+    if (rank == 0) {
+        printf("\n");
 #ifdef USE_MPI
         printf("%-38s %14s %12s %12s %12s\n",
                "Test", "Category", "MFLOPS", "Time(ms)", "Total(MFLOPS)");
@@ -754,6 +765,8 @@ int main(int argc, char *argv[]) {
         test_item_t *test = &test_registry[i];
         uint64_t flops = nnz_elements * 8;
 
+        memcpy(result, result_init, matrix_dim * sizeof(complex_float_t));
+
 #ifdef USE_MPI
         double time_sec = run_test(test, result, values, vector, MPI_COMM_WORLD);
 #else
@@ -765,8 +778,6 @@ int main(int argc, char *argv[]) {
         double total_mflops = 0.0;
         MPI_Reduce(&mflops, &total_mflops, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 #endif
-
-        int verify_result = verify_hemv(result, result_ref);
 
 #ifdef USE_MPI
         MPI_Barrier(MPI_COMM_WORLD);
@@ -785,11 +796,6 @@ int main(int argc, char *argv[]) {
             printf("%-38s %14s %12.2f %12.3f",
                    test->name, test->category, mflops, time_sec * 1000);
 #endif
-            if (verify_result > 0) {
-                printf("  VERIFY_FAIL(%d)", verify_result);
-            } else if (verify_result == 0) {
-                printf("  PASS");
-            }
             printf("\n");
         }
     }
@@ -808,6 +814,7 @@ int main(int argc, char *argv[]) {
     free(vector);
     free(result);
     free(result_ref);
+    free(result_init);
 
 #ifdef USE_MPI
     MPI_Finalize();
