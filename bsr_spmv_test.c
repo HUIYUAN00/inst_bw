@@ -75,10 +75,11 @@ static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vecto
     uint64_t nbr = matrix_size;
     uint64_t dim = nbr * r;
 
+    complex_float_t *y_orig = y;
     complex_float_t *y_save = NULL;
     posix_memalign((void**)&y_save, 64, dim * sizeof(complex_float_t));
-    memcpy(y_save, y, dim * sizeof(complex_float_t));
-    memset(y, 0, dim * sizeof(complex_float_t));
+    memset(y_save, 0, dim * sizeof(complex_float_t));
+    y = y_save;
 
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
@@ -109,8 +110,8 @@ static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vecto
 
     for (uint64_t i = 0; i < dim; i++) {
         complex_float_t ax = y[i];
-        y[i].re = alpha.re * ax.re - alpha.im * ax.im + beta.re * y_save[i].re - beta.im * y_save[i].im;
-        y[i].im = alpha.re * ax.im + alpha.im * ax.re + beta.re * y_save[i].im + beta.im * y_save[i].re;
+        y_orig[i].re = alpha.re * ax.re - alpha.im * ax.im + beta.re * y_orig[i].re - beta.im * y_orig[i].im;
+        y_orig[i].im = alpha.re * ax.im + alpha.im * ax.re + beta.re * y_orig[i].im + beta.im * y_orig[i].re;
     }
     free(y_save);
 }
@@ -174,10 +175,11 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
     svfloat32_t zzero = svdup_f32(0.0f);
     uint64_t total = (uint64_t)r * 2;
 
+    complex_float_t *y_orig = y;
     complex_float_t *y_save = NULL;
     posix_memalign((void**)&y_save, 64, dim * sizeof(complex_float_t));
-    memcpy(y_save, y, dim * sizeof(complex_float_t));
-    memset(y, 0, dim * sizeof(complex_float_t));
+    memset(y_save, 0, dim * sizeof(complex_float_t));
+    y = y_save;
 
     for (uint64_t I = 0; I < nbr; I++) {
 
@@ -383,8 +385,8 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
 
     for (uint64_t i = 0; i < dim; i++) {
         complex_float_t ax = y[i];
-        y[i].re = alpha.re * ax.re - alpha.im * ax.im + beta.re * y_save[i].re - beta.im * y_save[i].im;
-        y[i].im = alpha.re * ax.im + alpha.im * ax.re + beta.re * y_save[i].im + beta.im * y_save[i].re;
+        y_orig[i].re = alpha.re * ax.re - alpha.im * ax.im + beta.re * y_orig[i].re - beta.im * y_orig[i].im;
+        y_orig[i].im = alpha.re * ax.im + alpha.im * ax.re + beta.re * y_orig[i].im + beta.im * y_orig[i].re;
     }
     free(y_save);
 }
