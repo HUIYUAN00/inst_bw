@@ -154,167 +154,150 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
     int r = block_size;
     uint64_t nbr = matrix_size;
     uint64_t vl_floats = svcntw();  /* SVE向量寄存器可容纳的float32数 */
+    svbool_t pgall = svptrue_b32();
+    svfloat32_t zzero = svdup_f32(0.0f);
+    uint64_t total = (uint64_t)r * 2;
 
-    /* ===== 单趟遍历: 行主序外层循环,逐块识别对角/上三角 ===== */
     for (uint64_t I = 0; I < nbr; I++) {
+
+        /* ---- 对角块 (J==I): 块内 Hermitian,仅读上三角(bi<=bk) ----
+         *
+         * Hermitian性质: block[bk][bi] = conj(block[bi][bk])
+         *   对角线(bi==bk): block[bi][bi] 为实数(虚部=0)
+         *   下三角(bi>bk): 可由上三角共轭推导,无需存储
+         *
+         * 循环结构: r维循环(bi)为外层, for(bj)循环为内层。
+         *   对角线元素(bk==bi)单独标量处理: y[bi] += block[bi][bi] * x[bi]
+         *   循环从 bj=bi+1 开始,每次步进 svcntd() 个复数(64-bit)元素,
+         *   svwhilelt_b32(bj*2, r*2) 自动处理尾部不足一个寄存器的情况。
+         *
+         *   (1) 内积(bk>bi): y[bi] += block[bi][bk] * x[bk]
+         *       svcmla #0 + #90 完成复数乘法 a*x, 累加到 zacc
+         *       循环结束后统一归约 zacc → y[bi]
+         *
+         *   (2) 外积(bk>bi): y[bk] += conj(block[bi][bk]) * x[bi]
+         *       svcmla #0 + #270 计算 conj(a)*x:
+         *         #0:   [re += ar*xre,    im += ar*xim]
+         *         #270: [re += ai*xim,    im += -ai*xre]
+         *         合计: re += ar*xre+ai*xim, im += ar*xim-ai*xre ✓
+         *       原地读改写 zy, 仅写回 pg 激活 lane
+         */
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
             int32_t J = col_idx[j];
+            if ((uint64_t)J != I) continue;
             complex_float_t *block = &val[j * r * r];
+            complex_float_t *xi = &vec[I * r];
+            complex_float_t *yi = &y[I * r];
 
-            if ((uint64_t)J == I) {
-                /* ============================================================
-                 * 对角块(I==J): 块内 Hermitian,仅读上三角(bi<=bk)
-                 *
-                 * 块内布局 (r=4 示例),float视角,[]标记是否在读取范围内:
-                 *         bk=0      bk=1      bk=2      bk=3
-                 *   bi=0  [a00r a00i][a01r a01i][a02r a02i][a03r a03i]  ← 全部上三角
-                 *   bi=1  [a10r a10i][a11r a11i][a12r a12i][a13r a13i]  ← a10* 已跳过,仅 a11+ 上三角
-                 *   bi=2  [a20r a20i][a21r a21i][a22r a22i][a23r a23i]  ← a20*,a21* 跳过,仅 a22+ 上三角
-                 *   bi=3  [a30r a30i][a31r a31i][a32r a32i][a33r a33i]  ← 仅 a33 上三角
-                 *
-                 * Hermitian性质: block[bk][bi] = conj(block[bi][bk])
-                 *   对角线(bi==bk): block[bi][bi] 为实数(虚部=0)
-                 *   下三角(bi>bk): 可由上三角共轭推导,无需存储
-                 *
-                 * 循环结构: r维循环(bi)为外层, for(bj)循环为内层。
-                 *   对角线元素(bk==bi)单独标量处理: y[bi] += block[bi][bi] * x[bi]
-                 *   循环从 bj=bi+1 开始,每次步进 svcntd() 个复数(64-bit)元素,
-                 *   svwhilelt_b64(bj, r) 自动处理尾部不足一个寄存器的情况。
-                 *   循环内所有元素满足 bk>bi,内积外积使用相同谓词,无需区分 pg_upper/pg_strict。
-                 *
-                 *   (1) 内积(bk>bi): y[bi] += block[bi][bk] * x[bk]
-                 *       svcmla #0 + #90 完成复数乘法 a*x, 累加到 zacc
-                 *       循环结束后统一归约 zacc → y[bi]
-                 *
-                 *   (2) 外积(bk>bi): y[bk] += conj(block[bi][bk]) * x[bi]
-                 *       x[bi] 视为 64-bit (re,im 打包), svdup_u64 广播为 [xre,xim,xre,xim,...]
-                 *       svcmla #0 + #270 计算 conj(a)*x:
-                 *         #0:   [re += ar*xre,    im += ar*xim]
-                 *         #270: [re += ai*xim,    im += -ai*xre]
-                 *         合计: re += ar*xre+ai*xim, im += ar*xim-ai*xre ✓
-                 *       原地读改写 zy, 仅写回 pg 激活 lane
-                 * ============================================================ */
-                complex_float_t *xi = &vec[I * r];
-                complex_float_t *yi = &y[I * r];
+            for (int bi = 0; bi < r; bi++) {
+                float *br = (float *)&block[bi * r];
+                float *xr = (float *)xi;
+                float *yr = (float *)yi;
 
-                for (int bi = 0; bi < r; bi++) {
-                    float *br = (float *)&block[bi * r];
-                    float *xr = (float *)xi;
-                    float *yr = (float *)yi;
+                /* 对角线元素(bk==bi): 标量内积, block[bi][bi]为实数(虚部=0) */
+                complex_float_t a_diag = block[bi * r + bi];
+                yi[bi].re += a_diag.re * xi[bi].re;
+                yi[bi].im += a_diag.re * xi[bi].im;
 
-                    /* 对角线元素(bk==bi): 标量内积, block[bi][bi]为实数(虚部=0) */
-                    complex_float_t a_diag = block[bi * r + bi];
-                    yi[bi].re += a_diag.re * xi[bi].re;
-                    yi[bi].im += a_diag.re * xi[bi].im;
+                /* 外积广播向量: x[bi] 视为 1 个 double (2个float=1个复数), svdup_f64 广播
+                 * reinterpret 为 f32 后 = [re,im,re,im,...], 直接用于 FCMLA */
+                svfloat32_t zx_bcast = svreinterpret_f32_f64(svdup_f64(*(const double *)&xi[bi]));
 
-                    /* 外积广播向量: x[bi] 视为 1 个 double (2个float=1个复数), svdup_f64 广播
-                     * reinterpret 为 f32 后 = [re,im,re,im,...], 直接用于 FCMLA */
-                    svfloat32_t zx_bcast = svreinterpret_f32_f64(svdup_f64(*(const double *)&xi[bi]));
+                /* 内积累加器: 跨循环迭代累加,循环结束后统一归约 */
+                svfloat32_t zacc = svdup_f32(0.0f);
 
-                    /* 内积累加器: 跨循环迭代累加,循环结束后统一归约 */
+                /* 循环: bj从bi+1开始,每次处理svcntd()个复数(64-bit)元素
+                 * bj*2 为 float 偏移, svwhilelt_b32(bj*2, r*2) 生成32-bit谓词直接用于FCMLA */
+                uint64_t vld = svcntd();
+                for (int64_t bj = bi + 1; bj < r; bj += vld) {
+                    svbool_t pg = svwhilelt_b32(bj * 2, (int64_t)r * 2);
+
+                    svfloat32_t za = svld1_f32(pg, br + bj * 2);
+                    svfloat32_t zx = svld1_f32(pg, xr + bj * 2);
+
+                    /* (1) 内积(bk>bi): zacc += a * x[bk] */
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
+
+                    /* (2) 外积(bk>bi): y[bk] += conj(a) * x[bi], 原地读改写 zy */
+                    svfloat32_t zy = svld1_f32(pg, yr + bj * 2);
+                    zy = svcmla_f32_m(pg, zy, za, zx_bcast, 0);
+                    zy = svcmla_f32_m(pg, zy, za, zx_bcast, 270);
+                    svst1_f32(pg, yr + bj * 2, zy);
+                }
+
+                /* 内积累加器归约: zacc=[re,im,re,im,...] → sum_re, sum_im → y[bi] */
+                svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                yi[bi].re += svaddv_f32(pgall, zre);
+                yi[bi].im += svaddv_f32(pgall, zim);
+            }
+        }
+
+        /* ---- 上三角块 (J>I): 内积 y[I*r+i] += block[i][k] * x[J*r+k] ----
+         * 向量化循环为外层(遍历k方向的向量chunk), r维循环为内层(遍历块各行i)
+         * zx(x向量chunk) 所有行共享, 每行独立归约后直接累加到 y
+         * svcmla #0 + #90 完成复数乘法 a*x, svuzp1/svuzp2 分离, svaddv 归约 */
+        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
+            int32_t J = col_idx[j];
+            if ((uint64_t)J <= I) continue;
+            complex_float_t *block = &val[j * r * r];
+            float *xr = (float *)&vec[J * r];
+
+            uint64_t off = 0;
+            while (off < total) {
+                uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
+                svfloat32_t zx = svld1_f32(pg, xr + off);  /* x向量chunk,所有行共享 */
+
+                for (int i = 0; i < r; i++) {
+                    float *br = (float *)&block[i * r];
+                    svfloat32_t za = svld1_f32(pg, br + off);
                     svfloat32_t zacc = svdup_f32(0.0f);
-
-                    /* 循环: bj从bi+1开始,每次处理svcntd()个复数(64-bit)元素
-                     * bj*2 为 float 偏移, svwhilelt_b32(bj*2, r*2) 生成32-bit谓词直接用于FCMLA */
-                    uint64_t vld = svcntd();
-                    for (int64_t bj = bi + 1; bj < r; bj += vld) {
-                        svbool_t pg = svwhilelt_b32(bj * 2, (int64_t)r * 2);
-
-                        svfloat32_t za = svld1_f32(pg, br + bj * 2);
-                        svfloat32_t zx = svld1_f32(pg, xr + bj * 2);
-
-                        /* (1) 内积(bk>bi): zacc += a * x[bk] */
-                        zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
-                        zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
-
-                        /* (2) 外积(bk>bi): y[bk] += conj(a) * x[bi], 原地读改写 zy */
-                        svfloat32_t zy = svld1_f32(pg, yr + bj * 2);
-                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 0);
-                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 270);
-                        svst1_f32(pg, yr + bj * 2, zy);
-                    }
-
-                    /* 内积累加器归约: zacc=[re,im,re,im,...] → sum_re, sum_im → y[bi] */
-                    svbool_t pgall = svptrue_b32();
-                    svfloat32_t zzero = svdup_f32(0.0f);
-                    svfloat32_t zre = svuzp1_f32(zacc, zzero);
-                    svfloat32_t zim = svuzp2_f32(zacc, zzero);
-                    yi[bi].re += svaddv_f32(pgall, zre);
-                    yi[bi].im += svaddv_f32(pgall, zim);
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 0);   /* 实部交叉项 */
+                    zacc = svcmla_f32_m(pg, zacc, za, zx, 90);  /* 虚部交叉项 */
+                    svfloat32_t zre = svuzp1_f32(zacc, zzero);  /* 提取偶数lane(实部) */
+                    svfloat32_t zim = svuzp2_f32(zacc, zzero);  /* 提取奇数lane(虚部) */
+                    y[I * r + i].re += svaddv_f32(pgall, zre);
+                    y[I * r + i].im += svaddv_f32(pgall, zim);
                 }
-            } else {
-                /* ============================================================
-                 * 上三角块(I<J): 完整块内积 + 共轭转置外积
-                 *
-                 * (1) 内积: y[I*r+i] += block[i][k] * x[J*r+k],  i,k = 0..r-1
-                 *     块数据完整乘以 J 块列对应的向量段。
-                 * (2) 外积: y[J*r+k] += conj(block[i][k]) * x[I*r+i],  i,k = 0..r-1
-                 *     共轭转置贡献,补全下三角 A[J][I] = conj(A[I][J]) 的乘法。
-                 *
-                 * 循环结构: 向量化while循环(off)为外层, r维循环(i)为最内层。
-                 *   x/y 向量chunk 在外层加载一次,内层 r 行复用,减少访存次数。
-                 *   block 每行数据在内层循环中按需加载,各行独立计算。
-                 * ============================================================ */
+                off += cnt;
+            }
+        }
 
-                /* ---- (1) 内积: y[I*r+i] += a * x[J*r+k] ----
-                 * 向量化循环为外层(遍历k方向的向量chunk), r维循环为内层(遍历块各行i)
-                 * zx(x向量chunk) 所有行共享, 每行独立归约后直接累加到 y
-                 * svcmla #0 + #90 完成复数乘法 a*x, svuzp1/svuzp2 分离, svaddv 归约 */
-                float *xr = (float *)&vec[J * r];
-                uint64_t total = (uint64_t)r * 2;
-                svbool_t pgall = svptrue_b32();
-                svfloat32_t zzero = svdup_f32(0.0f);
+        /* ---- 下三角贡献 (J>I): 共轭转置 y[J*r+k] += conj(block[i][k]) * x[I*r+i] ----
+         * 向量化循环为外层(遍历k方向的向量chunk), r维循环为内层(遍历块各行i)
+         * zy(y向量chunk) 在外层加载一次,内层 r 行共享累加,最后统一写回
+         * 每行贡献 conj(block[i][k]) * x[i]
+         *
+         * conj(a)*x 实现 (FCMLA #0 + #270):
+         *   x[i] 视为 64-bit (re,im 打包), svdup_u64 广播为 [xre,xim,xre,xim,...]
+         *   FCMLA #0:   [re += ar*xre,    im += ar*xim]
+         *   FCMLA #270: [re += ai*xim,    im += -ai*xre]
+         *   合计: re += ar*xre+ai*xim, im += ar*xim-ai*xre ✓ = conj(a)*x */
+        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
+            int32_t J = col_idx[j];
+            if ((uint64_t)J <= I) continue;
+            complex_float_t *block = &val[j * r * r];
+            complex_float_t *xi = &vec[I * r];
+            float *yr = (float *)&y[J * r];
 
-                uint64_t off = 0;
-                while (off < total) {
-                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
-                    svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
-                    svfloat32_t zx = svld1_f32(pg, xr + off);  /* x向量chunk,所有行共享 */
+            uint64_t off = 0;
+            while (off < total) {
+                uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
+                svfloat32_t zy = svld1_f32(pg, yr + off);  /* y向量chunk,所有行共享 */
 
-                    for (int i = 0; i < r; i++) {
-                        float *br = (float *)&block[i * r];
-                        svfloat32_t za = svld1_f32(pg, br + off);
-                        svfloat32_t zacc = svdup_f32(0.0f);
-                        zacc = svcmla_f32_m(pg, zacc, za, zx, 0);   /* 实部交叉项 */
-                        zacc = svcmla_f32_m(pg, zacc, za, zx, 90);  /* 虚部交叉项 */
-                        svfloat32_t zre = svuzp1_f32(zacc, zzero);  /* 提取偶数lane(实部) */
-                        svfloat32_t zim = svuzp2_f32(zacc, zzero);  /* 提取奇数lane(虚部) */
-                        y[I * r + i].re += svaddv_f32(pgall, zre);
-                        y[I * r + i].im += svaddv_f32(pgall, zim);
-                    }
-                    off += cnt;
+                for (int i = 0; i < r; i++) {
+                    float *br = (float *)&block[i * r];
+                    svfloat32_t za = svld1_f32(pg, br + off);
+                    /* x[i] 视为 64-bit (re,im 打包), dup 广播到整个寄存器 */
+                    svfloat32_t zx_bcast = svreinterpret_f32_u64(svdup_u64(*(uint64_t *)&xi[i]));
+                    zy = svcmla_f32_m(pg, zy, za, zx_bcast, 0);    /* re += ar*xre, im += ar*xim */
+                    zy = svcmla_f32_m(pg, zy, za, zx_bcast, 270);  /* re += ai*xim, im += -ai*xre */
                 }
-
-                /* ---- (2) 外积: y[J*r+k] += conj(a) * x[I*r+i] ----
-                 * 向量化循环为外层(遍历k方向的向量chunk), r维循环为内层(遍历块各行i)
-                 * zy(y向量chunk) 在外层加载一次,内层 r 行共享累加,最后统一写回
-                 * 每行贡献 conj(block[i][k]) * x[i]
-                 *
-                 * conj(a)*x 实现 (FCMLA #0 + #270):
-                 *   x[i] 视为 64-bit (re,im 打包), svdup_u64 广播为 [xre,xim,xre,xim,...]
-                 *   FCMLA #0:   [re += ar*xre,    im += ar*xim]
-                 *   FCMLA #270: [re += ai*xim,    im += -ai*xre]
-                 *   合计: re += ar*xre+ai*xim, im += ar*xim-ai*xre ✓ = conj(a)*x */
-                complex_float_t *xi = &vec[I * r];
-                float *yr = (float *)&y[J * r];
-
-                off = 0;
-                while (off < total) {
-                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
-                    svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
-                    svfloat32_t zy = svld1_f32(pg, yr + off);  /* y向量chunk,所有行共享 */
-
-                    for (int i = 0; i < r; i++) {
-                        float *br = (float *)&block[i * r];
-                        svfloat32_t za = svld1_f32(pg, br + off);
-                        /* x[i] 视为 64-bit (re,im 打包), dup 广播到整个寄存器 */
-                        svfloat32_t zx_bcast = svreinterpret_f32_u64(svdup_u64(*(uint64_t *)&xi[i]));
-                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 0);    /* re += ar*xre, im += ar*xim */
-                        zy = svcmla_f32_m(pg, zy, za, zx_bcast, 270);  /* re += ai*xim, im += -ai*xre */
-                    }
-                    svst1_f32(pg, yr + off, zy);  /* 统一写回,所有行贡献已累加 */
-                    off += cnt;
-                }
+                svst1_f32(pg, yr + off, zy);  /* 统一写回,所有行贡献已累加 */
+                off += cnt;
             }
         }
     }
