@@ -235,33 +235,91 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
         }
 
         /* ---- 上三角块 (J>I): 内积 y[I*r+i] += block[i][k] * x[J*r+k] ----
-         * 向量化循环为外层(遍历k方向的向量chunk), r维循环为内层(遍历块各行i)
-         * zx(x向量chunk) 所有行共享, 每行独立归约后直接累加到 y
-         * svcmla #0 + #90 完成复数乘法 a*x, svuzp1/svuzp2 分离, svaddv 归约 */
-        for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
-            int32_t J = col_idx[j];
-            if ((uint64_t)J <= I) continue;
-            complex_float_t *block = &val[j * r * r];
-            float *xr = (float *)&vec[J * r];
+         * 4块循环展开: 一次迭代处理4个不同block,4路FCMLA累加后合并归约
+         * col_idx行内有序,跳过对角块后剩余均为上三角,4块一组处理,尾部单独兜底
+         * svcmla #0 + #90 完成复数乘法 a*x, 4路累加器 svadd 合并后 svuzp1/svuzp2 + svaddv 归约 */
+        {
+            uint64_t j = row_ptr[I];
+            uint64_t j_end = row_ptr[I + 1];
+            while (j < j_end && (uint64_t)col_idx[j] <= I) j++;
 
-            uint64_t off = 0;
-            while (off < total) {
-                uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
-                svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
-                svfloat32_t zx = svld1_f32(pg, xr + off);  /* x向量chunk,所有行共享 */
+            for (; j + 3 < j_end; j += 4) {
+                int32_t J0 = col_idx[j], J1 = col_idx[j + 1], J2 = col_idx[j + 2], J3 = col_idx[j + 3];
+                complex_float_t *block0 = &val[j * r * r];
+                complex_float_t *block1 = &val[(j + 1) * r * r];
+                complex_float_t *block2 = &val[(j + 2) * r * r];
+                complex_float_t *block3 = &val[(j + 3) * r * r];
+                float *xr0 = (float *)&vec[J0 * r];
+                float *xr1 = (float *)&vec[J1 * r];
+                float *xr2 = (float *)&vec[J2 * r];
+                float *xr3 = (float *)&vec[J3 * r];
 
-                for (int i = 0; i < r; i++) {
-                    float *br = (float *)&block[i * r];
-                    svfloat32_t za = svld1_f32(pg, br + off);
-                    svfloat32_t zacc = svdup_f32(0.0f);
-                    zacc = svcmla_f32_m(pg, zacc, za, zx, 0);   /* 实部交叉项 */
-                    zacc = svcmla_f32_m(pg, zacc, za, zx, 90);  /* 虚部交叉项 */
-                    svfloat32_t zre = svuzp1_f32(zacc, zzero);  /* 提取偶数lane(实部) */
-                    svfloat32_t zim = svuzp2_f32(zacc, zzero);  /* 提取奇数lane(虚部) */
-                    y[I * r + i].re += svaddv_f32(pgall, zre);
-                    y[I * r + i].im += svaddv_f32(pgall, zim);
+                uint64_t off = 0;
+                while (off < total) {
+                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                    svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
+                    svfloat32_t zx0 = svld1_f32(pg, xr0 + off);
+                    svfloat32_t zx1 = svld1_f32(pg, xr1 + off);
+                    svfloat32_t zx2 = svld1_f32(pg, xr2 + off);
+                    svfloat32_t zx3 = svld1_f32(pg, xr3 + off);
+
+                    for (int i = 0; i < r; i++) {
+                        svfloat32_t za0 = svld1_f32(pg, (float *)&block0[i * r] + off);
+                        svfloat32_t za1 = svld1_f32(pg, (float *)&block1[i * r] + off);
+                        svfloat32_t za2 = svld1_f32(pg, (float *)&block2[i * r] + off);
+                        svfloat32_t za3 = svld1_f32(pg, (float *)&block3[i * r] + off);
+
+                        svfloat32_t zacc0 = svdup_f32(0.0f);
+                        svfloat32_t zacc1 = svdup_f32(0.0f);
+                        svfloat32_t zacc2 = svdup_f32(0.0f);
+                        svfloat32_t zacc3 = svdup_f32(0.0f);
+                        zacc0 = svcmla_f32_m(pg, zacc0, za0, zx0, 0);
+                        zacc0 = svcmla_f32_m(pg, zacc0, za0, zx0, 90);
+                        zacc1 = svcmla_f32_m(pg, zacc1, za1, zx1, 0);
+                        zacc1 = svcmla_f32_m(pg, zacc1, za1, zx1, 90);
+                        zacc2 = svcmla_f32_m(pg, zacc2, za2, zx2, 0);
+                        zacc2 = svcmla_f32_m(pg, zacc2, za2, zx2, 90);
+                        zacc3 = svcmla_f32_m(pg, zacc3, za3, zx3, 0);
+                        zacc3 = svcmla_f32_m(pg, zacc3, za3, zx3, 90);
+
+                        /* 4路累加器合并后统一归约 */
+                        zacc0 = svadd_f32_x(pgall, zacc0, zacc1);
+                        zacc2 = svadd_f32_x(pgall, zacc2, zacc3);
+                        zacc0 = svadd_f32_x(pgall, zacc0, zacc2);
+                        svfloat32_t zre = svuzp1_f32(zacc0, zzero);
+                        svfloat32_t zim = svuzp2_f32(zacc0, zzero);
+                        y[I * r + i].re += svaddv_f32(pgall, zre);
+                        y[I * r + i].im += svaddv_f32(pgall, zim);
+                    }
+                    off += cnt;
                 }
-                off += cnt;
+            }
+
+            /* 尾部剩余块(不足4个) */
+            for (; j < j_end; j++) {
+                int32_t J = col_idx[j];
+                complex_float_t *block = &val[j * r * r];
+                float *xr = (float *)&vec[J * r];
+
+                uint64_t off = 0;
+                while (off < total) {
+                    uint64_t cnt = (total - off < vl_floats) ? (total - off) : vl_floats;
+                    svbool_t pg = svcmplt_u32(pgall, svindex_u32(0, 1), svdup_u32(cnt));
+                    svfloat32_t zx = svld1_f32(pg, xr + off);
+
+                    for (int i = 0; i < r; i++) {
+                        float *br = (float *)&block[i * r];
+                        svfloat32_t za = svld1_f32(pg, br + off);
+                        svfloat32_t zacc = svdup_f32(0.0f);
+                        zacc = svcmla_f32_m(pg, zacc, za, zx, 0);
+                        zacc = svcmla_f32_m(pg, zacc, za, zx, 90);
+                        svfloat32_t zre = svuzp1_f32(zacc, zzero);
+                        svfloat32_t zim = svuzp2_f32(zacc, zzero);
+                        y[I * r + i].re += svaddv_f32(pgall, zre);
+                        y[I * r + i].im += svaddv_f32(pgall, zim);
+                    }
+                    off += cnt;
+                }
             }
         }
 
