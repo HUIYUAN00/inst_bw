@@ -24,6 +24,8 @@ typedef struct {
     float im;
 } complex_float_t;
 
+static complex_float_t alpha = {1.0f, 0.0f};
+static complex_float_t beta = {1.0f, 0.0f};
 static uint64_t nnz_blocks = 0;
 static uint64_t *row_ptr = NULL;
 static int32_t *col_idx = NULL;
@@ -71,6 +73,12 @@ static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vecto
     complex_float_t *y = (complex_float_t *)result_ptr;
     int r = block_size;
     uint64_t nbr = matrix_size;
+    uint64_t dim = nbr * r;
+
+    complex_float_t *y_save = NULL;
+    posix_memalign((void**)&y_save, 64, dim * sizeof(complex_float_t));
+    memcpy(y_save, y, dim * sizeof(complex_float_t));
+    memset(y, 0, dim * sizeof(complex_float_t));
 
     for (uint64_t I = 0; I < nbr; I++) {
         for (uint64_t j = row_ptr[I]; j < row_ptr[I + 1]; j++) {
@@ -98,6 +106,13 @@ static void spmv_bsr_herm_scalar(void *result_ptr, void *values_ptr, void *vecto
             }
         }
     }
+
+    for (uint64_t i = 0; i < dim; i++) {
+        complex_float_t ax = y[i];
+        y[i].re = alpha.re * ax.re - alpha.im * ax.im + beta.re * y_save[i].re - beta.im * y_save[i].im;
+        y[i].im = alpha.re * ax.im + alpha.im * ax.re + beta.re * y_save[i].im + beta.im * y_save[i].re;
+    }
+    free(y_save);
 }
 
 /*
@@ -153,10 +168,16 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
     complex_float_t *y = (complex_float_t *)result_ptr;
     int r = block_size;
     uint64_t nbr = matrix_size;
+    uint64_t dim = nbr * r;
     uint64_t vl_floats = svcntw();  /* SVE向量寄存器可容纳的float32数 */
     svbool_t pgall = svptrue_b32();
     svfloat32_t zzero = svdup_f32(0.0f);
     uint64_t total = (uint64_t)r * 2;
+
+    complex_float_t *y_save = NULL;
+    posix_memalign((void**)&y_save, 64, dim * sizeof(complex_float_t));
+    memcpy(y_save, y, dim * sizeof(complex_float_t));
+    memset(y, 0, dim * sizeof(complex_float_t));
 
     for (uint64_t I = 0; I < nbr; I++) {
 
@@ -359,6 +380,13 @@ static void spmv_bsr_herm_sve(void *result_ptr, void *values_ptr, void *vector_p
             }
         }
     }
+
+    for (uint64_t i = 0; i < dim; i++) {
+        complex_float_t ax = y[i];
+        y[i].re = alpha.re * ax.re - alpha.im * ax.im + beta.re * y_save[i].re - beta.im * y_save[i].im;
+        y[i].im = alpha.re * ax.im + alpha.im * ax.re + beta.re * y_save[i].im + beta.im * y_save[i].re;
+    }
+    free(y_save);
 }
 
 static test_item_t test_registry[] = {
@@ -378,6 +406,8 @@ static void print_usage(const char *prog_name) {
     printf("  -w, --warmup <N>        Warmup iterations (default: 5)\n");
     printf("  -t, --test <N>          Test iterations (default: 10)\n");
     printf("  -p, --print-all         Print all ranks' results (MPI only)\n");
+    printf("  --alpha <re,im>         Complex alpha (default: 1.0,0.0)\n");
+    printf("  --beta <re,im>          Complex beta (default: 1.0,0.0)\n");
     printf("\nNote: Tests Hermitian BSR SpMV (complex float) with upper triangle block storage\n");
     printf("      Diagonal blocks are Hermitian (conjugate-symmetric)\n");
     printf("      Off-diagonal blocks use conjugate symmetry for lower triangle\n");
@@ -528,6 +558,14 @@ int main(int argc, char *argv[]) {
             print_all_ranks = 1;
             continue;
         }
+        if (strcmp(argv[i], "--alpha") == 0) {
+            if (i + 1 < argc) sscanf(argv[++i], "%f,%f", &alpha.re, &alpha.im);
+            continue;
+        }
+        if (strcmp(argv[i], "--beta") == 0) {
+            if (i + 1 < argc) sscanf(argv[++i], "%f,%f", &beta.re, &beta.im);
+            continue;
+        }
         run_all = 0;
         num_specs++;
     }
@@ -555,6 +593,8 @@ int main(int argc, char *argv[]) {
     MPI_Bcast(&test_iter, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&random_seed, 1, MPI_UNSIGNED, 0, MPI_COMM_WORLD);
     MPI_Bcast(&print_all_ranks, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&alpha, 2, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&beta, 2, MPI_FLOAT, 0, MPI_COMM_WORLD);
 #endif
 
     uint64_t num_block_rows = matrix_size;
@@ -587,6 +627,8 @@ int main(int argc, char *argv[]) {
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
         printf("Random Seed: %u\n", random_seed);
+        printf("Alpha: (%.6f, %.6f)\n", alpha.re, alpha.im);
+        printf("Beta: (%.6f, %.6f)\n", beta.re, beta.im);
         printf("Registered Tests: %d\n", test_count);
         printf("\n");
     }
