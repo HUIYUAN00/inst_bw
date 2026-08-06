@@ -14,12 +14,11 @@
 
 static int warmup_iter = 5;
 static int test_iter = 10;
-static uint64_t buffer_size = 0;
 static double sparsity = 0.0;
 static int print_all_ranks = 0;
 static uint64_t num_nonzero = 0;
 
-static double sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *indices, uint64_t size) {
+static double sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *indices) {
     double *dense_vec_d = (double *)a;
     double *sparse_vec_d = (double *)b;
     uint64_t vl_d = svcntd();
@@ -45,7 +44,7 @@ static double sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *in
 
 typedef struct {
     const char *name;
-    double (*func)(void *a, void *b, int32_t *indices, uint64_t size);
+    double (*func)(void *a, void *b, int32_t *indices);
 } test_item_t;
 
 static test_item_t test_registry[] = {
@@ -168,7 +167,6 @@ int main(int argc, char *argv[]) {
     }
     
     uint64_t total_elements = (uint64_t)(num_nonzero / sparsity);
-    buffer_size = total_elements * sizeof(double);
     
     if (rank == 0) {
         printf("================================================================================\n");
@@ -182,7 +180,7 @@ int main(int argc, char *argv[]) {
         printf("VL (double): %lu elements\n", vl_d);
         printf("Non-Zero Elements: %lu\n", num_nonzero);
         printf("Sparsity: %.4f (%.2f%%)\n", sparsity, sparsity * 100);
-        printf("Calculated Buffer Size: %lu MB per array\n", buffer_size / (1024 * 1024));
+        printf("Calculated Buffer Size: %lu MB per array\n", total_elements * sizeof(double) / (1024 * 1024));
         printf("Warmup Iterations: %d\n", warmup_iter);
         printf("Test Iterations: %d\n", test_iter);
         printf("Registered Tests: %d\n", test_count);
@@ -193,7 +191,7 @@ int main(int argc, char *argv[]) {
     int32_t *gather_indices = NULL;
     
     a = malloc(num_nonzero * sizeof(double));
-    b = malloc(buffer_size);
+    b = malloc(total_elements * sizeof(double));
     gather_indices = malloc(num_nonzero * sizeof(int32_t));
     
     if (a == NULL || b == NULL || gather_indices == NULL) {
@@ -213,7 +211,7 @@ int main(int argc, char *argv[]) {
         da[i] = (double)rand() / RAND_MAX;
     }
     
-    uint64_t max_element_idx_64 = buffer_size / sizeof(int64_t) - 1;
+    uint64_t max_element_idx_64 = total_elements - 1;
     uint64_t max_idx = (max_element_idx_64 < INT32_MAX) ? max_element_idx_64 : INT32_MAX;
     
     uint64_t stride = (max_idx + 1) / num_nonzero;
@@ -224,7 +222,7 @@ int main(int argc, char *argv[]) {
         gather_indices[i] = (int32_t)idx;
     }
     
-    memset(b, 0, buffer_size);
+    memset(b, 0, total_elements * sizeof(double));
     double *db = (double *)b;
     for (uint64_t i = 0; i < num_nonzero; i++) {
         db[gather_indices[i]] = (double)rand() / RAND_MAX;
@@ -256,7 +254,7 @@ int main(int argc, char *argv[]) {
 #endif
     
     for (int w = 0; w < warmup_iter; w++) {
-        test_registry[0].func(a, b, gather_indices, buffer_size);
+        test_registry[0].func(a, b, gather_indices);
     }
     
 #ifdef USE_MPI
@@ -265,7 +263,7 @@ int main(int argc, char *argv[]) {
     
     gettimeofday(&start, NULL);
     for (int t = 0; t < test_iter; t++) {
-        last_result = test_registry[0].func(a, b, gather_indices, buffer_size);
+        last_result = test_registry[0].func(a, b, gather_indices);
     }
     gettimeofday(&end, NULL);
     
