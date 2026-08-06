@@ -21,25 +21,23 @@ static uint64_t num_nonzero = 0;
 static double sve_gather_d_vec_idx_fmla_single_reg(void *a, void *b, int32_t *indices) {
     double *dense_vec_d = (double *)a;
     double *sparse_vec_d = (double *)b;
-    uint64_t vl_d = svcntd();
-    uint64_t iterations = num_nonzero / vl_d;
     
-    svbool_t pg = svptrue_b64();
+    svbool_t pg;
     svfloat64_t dot_acc = svdup_f64(0.0);
+    svfloat64_t dense_vec, gathered;
+    svuint64_t indices_vec;
     int32_t *idx_ptr = indices;
     
-    for (uint64_t i = 0; i < iterations; i++) {
-        svfloat64_t dense_vec = svld1_f64(pg, dense_vec_d);
-        svint64_t indices_vec = svld1sw_s64(pg, idx_ptr);
-        svfloat64_t gathered = svld1_gather_s64index_f64(pg, sparse_vec_d, indices_vec);
+    for (uint64_t i = 0; i < num_nonzero; i += svcntd()) {
+        pg = svwhilelt_b64(i, num_nonzero);
+        dense_vec = svld1(pg, dense_vec_d + i);
+        indices_vec = svld1sw_u64(pg, idx_ptr + i);
+        gathered = svld1_gather_index(pg, sparse_vec_d, indices_vec);
         
-        dot_acc = svmla_f64_z(pg, dot_acc, dense_vec, gathered);
-        
-        dense_vec_d += vl_d;
-        idx_ptr += vl_d;
+        dot_acc = svmla_m(pg, dot_acc, dense_vec, gathered);
     }
     
-    return svaddv_f64(pg, dot_acc);
+    return svaddv_f64(svptrue_b64(), dot_acc);
 }
 
 typedef struct {
